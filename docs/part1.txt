@@ -1,0 +1,15 @@
+few thought from going over history.csv:
+1. prior_refunds_12m/tenure_months
+    number of refunds in the last 12 months / amount of time in months the user is in the system
+    we can create a metric that tells us how often the user asks for refund, which can help us flag it as fraud maybe?
+    maybe we can use something like:
+    SELECT fraud_flag, AVG(prior_refunds_12m/MIN(12,tenure_months))
+    FROM read_csv('c:/projects/ww_inter/data/history.csv')
+    GROUP BY fraud_flag
+
+
+
+first step: classify as auto approve
+has to have:
+1. fraud_flag = no (also N, false?)
+2. 
