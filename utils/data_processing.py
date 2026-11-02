@@ -1,4 +1,4 @@
-"""Normalize refund request dates and amounts without losing money precision."""
+"""Normalize refund request dates and amounts; owns the single USD amount parser."""
 
 import re
 from datetime import datetime
@@ -7,17 +7,52 @@ from decimal import Decimal, InvalidOperation
 import pandas as pd
 
 
-_DATE_FORMATS = (
-    (re.compile(r"\d{4}-\d{2}-\d{2}"), "%Y-%m-%d"),
-    (re.compile(r"\d{2}/\d{2}/\d{4}"), "%d/%m/%Y"),
-    (re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"), "%Y-%m-%dT%H:%M:%SZ"),
-)
 _AMOUNT_NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?"
 _AMOUNT_PATTERN = re.compile(
     rf"\s*(?:\$\s*(?P<dollar>{_AMOUNT_NUMBER})"
     rf"|USD\s*(?P<usd_prefix>{_AMOUNT_NUMBER})"
     rf"|(?P<plain>{_AMOUNT_NUMBER})(?:\s*USD)?)\s*",
     re.IGNORECASE,
+)
+
+
+def parse_amount(value: object) -> Decimal | None:
+    """Return a finite, non-negative USD amount as an exact Decimal, or None.
+
+    Accepts int/float/Decimal, or a string such as ``$1,150.00``, ``USD 120``,
+    or ``55.00 USD`` (at most two decimals). Anything else returns None so
+    callers can fail closed to human review.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        # NaN is the only value not equal to itself; avoids importing pandas.
+        if value != value:
+            return None
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+    elif isinstance(value, str):
+        match = _AMOUNT_PATTERN.fullmatch(value)
+        if match is None:
+            return None
+        amount_text = next(part for part in match.groupdict().values() if part is not None)
+        try:
+            amount = Decimal(amount_text.replace(",", ""))
+        except InvalidOperation:
+            return None
+    else:
+        return None
+    if not amount.is_finite() or amount < 0:
+        return None
+    return amount
+
+
+_DATE_FORMATS = (
+    (re.compile(r"\d{4}-\d{2}-\d{2}"), "%Y-%m-%d"),
+    (re.compile(r"\d{2}/\d{2}/\d{4}"), "%d/%m/%Y"),
+    (re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"), "%Y-%m-%dT%H:%M:%SZ"),
 )
 
 
@@ -44,21 +79,17 @@ def normalize_date_column(df: pd.DataFrame, column_name: str) -> pd.DataFrame:
 
 def _normalize_amount_value(value: object) -> Decimal | object:
     """Parse a supported non-negative USD amount as Decimal, or return pd.NA."""
-    if pd.isna(value) or isinstance(value, bool):
+    if pd.isna(value):
         return pd.NA
 
-    match = _AMOUNT_PATTERN.fullmatch(str(value))
-    if match is None:
+    amount = parse_amount(value)
+    if amount is None:
         return pd.NA
-
-    amount_text = next(group for group in match.groupdict().values() if group is not None)
-    try:
-        amount = Decimal(amount_text.replace(",", ""))
-        if amount < 0:
-            return pd.NA
-        return amount.quantize(Decimal("0.01"))
-    except InvalidOperation:
+    cents = amount.quantize(Decimal("0.01"))
+    # Never silently round money: sub-cent precision is treated as unparseable.
+    if amount != cents:
         return pd.NA
+    return cents
 
 
 def _normalize_amount(df: pd.DataFrame) -> pd.DataFrame:

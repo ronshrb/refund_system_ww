@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
 
+from utils.data_processing import parse_amount
+
 
 _POLICY_KEYS = {"version", "status", "comment", "allow"}
 _RULE_KEYS = {"id", "action", "all_of"}
@@ -22,13 +24,6 @@ _OPERATORS = {
     "support_note_blank",
     "request_id_not_already_paid",
 }
-_AMOUNT_NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?"
-_AMOUNT_PATTERN = re.compile(
-    rf"\s*(?:\$\s*(?P<dollar>{_AMOUNT_NUMBER})"
-    rf"|USD\s*(?P<usd_prefix>{_AMOUNT_NUMBER})"
-    rf"|(?P<plain>{_AMOUNT_NUMBER})(?:\s*USD)?)\s*",
-    re.IGNORECASE,
-)
 _INTEGER_PATTERN = re.compile(r"[+-]?\d+")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 
@@ -135,30 +130,6 @@ def _parse_integer(value):
     return None
 
 
-def _parse_amount(value):
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float, Decimal)):
-        try:
-            amount = Decimal(str(value))
-        except (InvalidOperation, ValueError):
-            return None
-    elif isinstance(value, str):
-        match = _AMOUNT_PATTERN.fullmatch(value)
-        if match is None:
-            return None
-        amount_text = next(part for part in match.groupdict().values() if part is not None)
-        try:
-            amount = Decimal(amount_text.replace(",", ""))
-        except InvalidOperation:
-            return None
-    else:
-        return None
-    if not amount.is_finite() or amount < 0:
-        return None
-    return amount
-
-
 def _reason_key(value):
     return _WHITESPACE_PATTERN.sub("_", value.strip().casefold())
 
@@ -180,7 +151,7 @@ def _evaluate_condition(operator, expected, request, already_paid_ids):
         return value <= expected, "condition_not_met"
 
     if operator in {"amount_usd_gt", "amount_usd_lte"}:
-        value = _parse_amount(request.get("amount_usd"))
+        value = parse_amount(request.get("amount_usd"))
         if value is None:
             return None, "invalid_request"
         threshold = Decimal(str(expected))
