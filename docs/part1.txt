@@ -11,7 +11,7 @@ few thought from going over history.csv:
 
 questions:
 1. what is considered a good customer?
-2. 
+2. small stuff = cheap? where is the limit?
 
 
 first step: classify as auto approve

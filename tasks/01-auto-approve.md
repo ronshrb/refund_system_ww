@@ -14,6 +14,55 @@ Task 00 left the tenure cutoff open. The floor and the cap below are proposed. T
 
 `decided_by=auto` is observed behavior. It is not this list. Task 00 already marks some of those autos unsafe: blank tenure, `never_arrived`, messy fraud flags.
 
+This list is the **proposed contents of policy v1**, not a prompt. Auto-approve is a function over that JSON (task 02). An LLM does not read this list and decide. It does not update the live file. It does not pay.
+
+## How auto-approve runs
+
+Same request + same live JSON → same result, every time. That is the consistency. A chat agent will not give you that.
+
+```text
+load live policy JSON
+evaluate(request, policy) → approve_full | review, plus which rule/rail fired
+if approve_full: record decided_by=auto
+else: queue for a person
+```
+
+`evaluate` is ordinary code: rails first, then this allow-list, fail closed. It is the only thing that may set auto. If you have an agent at intake, it may **call** that function (a tool). It may not interpret the JSON itself, and it has no `approve()` tool.
+
+The manager talking to an agent (task 02) is a different path. That agent may draft a JSON patch. It cannot run this list, and it cannot move the live pointer.
+
+## The evaluate tool
+
+One function. It is also the only tool intake may call. It does not read `comment` or `source_note`. It does not invent operators. Unknown key, bad JSON, or a field that will not parse → `review`. Never `approve_full` on those.
+
+```text
+evaluate(request, policy) →
+  { decision: approve_full | review,
+    policy_version,
+    matched_rule: id or null,
+    failed_checks: [ { rule_id, group, operator, got } ] }
+```
+
+**Walk.** For each object in `policy.allow`, in order: every entry in `all_of` must pass, and every key in that entry’s `when` must pass. If they all pass and `action` is `approve_full`, stop and return that. If no rule passes, `review`. Two `allow` objects would be OR (first hit wins). This file has one, so notes 1 and 2 cannot pay alone.
+
+**Closed operators.** Anything not in this table is unknown → `review` for the whole request.
+
+| JSON key | Passes when the parsed request… |
+|---|---|
+| `stated_reason` | equals the string (after the task 00 clean: `changed mind` → `changed_mind`) |
+| `days_since_delivery_gte` / `_lte` | integer, in range. Blank or negative fails the gte/lte as written |
+| `amount_usd_gt` / `_lte` | number, in range. Parse `$`, commas, `USD`, spaces first. Unparseable fails |
+| `tenure_months_gte` | integer ≥ N. Blank fails |
+| `fraud_flag` | `"no"` means cleaned `no` / `N` / `false`. `yes`, `Y`, blank fail |
+| `customer_id_present` | true → id non-empty |
+| `customer_note_blank` | true → missing or whitespace only. Do not read the text |
+| `support_note_blank` | true → missing or whitespace only. Do not read the text |
+| `request_id_not_already_paid` | true → this id has no prior `approved` / `partial` |
+
+`simulate(policy)` is the same function over `history.csv` and pending, used by the manager preview. No second implementation.
+
+Not a tool: `approve()`, writing live JSON, or an LLM “checking” the file.
+
 ## Allow-list
 
 Approve the full parsed `amount_usd`, with no person, only when every item below is true.
@@ -29,6 +78,14 @@ Approve the full parsed `amount_usd`, with no person, only when every item below
 9. This `request_id` has not already been paid. A second copy is not a second refund.
 
 `prior_refunds_12m` is not a condition. It cannot add trust and it cannot push a case off this list.
+
+## Example policy JSON (auto-approve only)
+
+File: `policy/auto-approve.example.json`. Proposed, not activated. This is the allow-list above as data. Rails and review rules are not in this file.
+
+Notes 1 and 2 are **both required** (AND), not two auto paths. Note 1 is “small” + “good customer” → that is `amount_usd_lte` 49 and `tenure_months_gte` 3. Those numbers are not in the note; they are the proposed floor/cap from this task. Note 2 is the reason and the 14-day window. It does not say auto and it does not say small. Putting them in one `allow` is so a $400 change-of-mind on day 3, or a $20 damaged item, does not auto-pay. Note 5 is only `fraud_flag: no` on this rule. Notes 3, 4, 6, and 7 do not get a rule.
+
+See `policy/auto-approve.example.json`.
 
 ## Not auto
 

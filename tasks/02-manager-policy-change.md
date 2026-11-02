@@ -8,21 +8,73 @@ Acceptance checks: not set yet. Not implemented. Do not activate policy from thi
 
 ## Deferred
 
-Open for later. This file is the design, not a go-ahead to build.
+Open for later. This file is the design, not a go-ahead to build. Reviewer page is a later task.
 
 A settings page with “amount cap = 300” and “stolen-card = off” is the right **editor**, and still the wrong **product**. She can change numbers an engineer already thought of. She cannot change what the system *is*, and she still would not know the blast radius before it pays anyone.
 
 Policy is versioned data. The evaluator is code. An LLM may *draft* a structured patch. It must not authorize refunds or turn the policy on. Only she activates.
 
+## Admin page (accepted journey)
+
+One page. First boot: no live allow-rules (`allow: []`, or no live file treated the same). `evaluate` still runs. History and pending all show **review**. Auto-pay starts only after she picks a policy that has allow-rules.
+
+1. Admin opens the **policy page**.
+2. On that page they can:
+   - **Download** the current policy as JSON.
+   - **Evaluate on history** — what `evaluate` would decide for each history row under the current policy. This is not the chat agent judging tickets. Same function as intake.
+   - **Talk to an agent** to update the policy. The agent asks guiding questions (what is small stuff, what is a good customer, 14-day window, …) so the JSON is filled in the clearest way the schema allows. Output is a **draft** version, never live. `policy/auto-approve.example.json` is a proposal the agent may offer, with the evidence, not the file that is already live.
+3. Admin sees the **results and evaluation of the new (draft) policy** next to the current one, and **picks which policy to use**. Pick = activate that version. The other version stays in history. They can pick current (do nothing) or the draft (go live) or an older download they still have.
+
+The chat never sets `decided_by=auto`. After a pick, intake uses the chosen JSON through `evaluate`.
+
+## Two paths, not one agent
+
+Do not let the same agent update the JSON *and* auto-approve tickets. That is how it makes mistakes and how RF-1073 (“skip human review”) gets paid.
+
+| Path | Who | What it may do | What it must not do |
+|---|---|---|---|
+| Manager | She talks; an LLM may help | Draft a JSON patch, run preview, show interpretation | Write the live file, approve a ticket, follow `customer_note` |
+| Intake | Code, every new request | `evaluate(request, live_json)` | Read the JSON as a prompt, invent a rule, pay on uncertainty |
+
+Auto-approve does not “use” the JSON by understanding it. A function uses it. Task 01 is the proposed v1 *contents*. After she activates v2, intake uses v2. No code deploy. No second opinion from a model.
+
+That is the change in how we think about auto-approve: the allow-list is data the engine already knows how to run, not instructions for an agent.
+
+## Tools (yes — as a gate, not as a brain)
+
+Tools are how you keep the LLM off the money. Give each path only the tools it needs. The model cannot approve by talking.
+
+**Intake** (or a reviewer copilot) may call:
+
+- `evaluate(request_id)` → `{decision, policy_version, matched_rule, failed_checks}`  
+  Loads **live** JSON only. Deterministic. This is the only path to `decided_by=auto`.
+- `extract_evidence(notes)` (optional, later) → structured flags (`stolen_card_confirmed`, `photo_attached`, …) or `unknown`.  
+  `unknown` cannot satisfy an allow-list condition. Extraction never calls approve.
+
+Intake must **not** have: `write_policy`, `activate_policy`, `approve`, `reject`.
+
+**Manager** may call:
+
+- `draft_policy(patch | natural_language)` → new version with `status=draft` (never live)
+- `simulate_policy(draft_version)` → the **same** `evaluate` on history + pending, live vs draft
+- `activate_policy(version)` only after she confirms. Prefer a button that is not an LLM tool. If it is a tool, it still requires an explicit non-model confirmation.
+- `rollback_policy()` → point live at the previous version
+
+Manager must **not** have: `approve` on a ticket.
+
+If `draft_policy` cannot express the sentence in the schema, it returns `cannot_express`. It does not write a fuzzy rule and it does not update live JSON “so the auto-approve agent can interpret it.”
+
+Schema-invalid JSON is rejected at write time. Intake that cannot load or cannot parse a field → review, never approve.
+
 ## What she actually does
 
-Three screens, one live pointer.
+The admin page above is the journey. One live pointer.
 
-1. **Draft.** She types English *or* edits the structured form. The system writes a **new policy version** with `status=draft`. Live traffic still uses the previous version.
-2. **Preview.** The same evaluator runs twice on `history.csv` (and the current pending queue): live policy vs draft. She sees flips, not a green checkbox.
-3. **Activate.** Only she does this. The live pointer moves. Version history stays. Rollback is “point live at vN−1,” not a code revert.
+- **Draft** comes from the chat (guiding questions → JSON), not from a knob form as the main path.
+- **Preview** is evaluate-on-history for current and for the draft, shown so she can pick.
+- **Pick** moves the live pointer. Rollback is pick an earlier version (or re-download and pick).
 
-That is how she changes the system without an engineer, and how she knows what it will do: **replay, then a deliberate go-live**.
+That is how she changes the system without an engineer, and how she knows what it will do: **replay, then she chooses the file**.
 
 ## Why knobs feel hardcoded (they are)
 
@@ -133,11 +185,11 @@ A new **kind of fact**. “If the note mentions Northfield…” is not a number
 
 When this task is picked up, ship:
 
-1. Policy JSON + version pointer on disk
-2. `evaluate(request, policy)` with rails then allow-list
-3. Manager: edit known fields, optional NL → draft
-4. Replay table + $ / count summary
-5. Activate + rollback
+1. Policy JSON + version pointer on disk (live starts with empty `allow`)
+2. `evaluate(request, policy)` — closed operators, fail closed
+3. Policy page: download JSON, evaluate-on-history, chat that drafts a new version
+4. Side-by-side results; she picks which version is live
+5. Reviewer page later, not this task
 
 Do not ship Drools, a visual rule builder, or “she can add any condition.” The form can look like settings. The **live path is data + replay + an explicit go-live**, which is what a settings page is missing.
 

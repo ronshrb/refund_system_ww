@@ -220,3 +220,51 @@ Open a task for that. We will pick it up later. Write what I wrote here.
 ### I did
 
 `tasks/02-manager-policy-change.md` — not-started, deferred. Design only. No implementation.
+
+### You asked
+
+With task 02, should we change how we think about auto-approve? If the admin talks to an agent and the agent updates JSON, how does that agent use it to auto-approve? Must not make mistakes; must be consistent. Maybe tools.
+
+### I gave
+
+Two paths. The manager agent drafts JSON; it does not pay. Intake auto-approve is `evaluate(request, live_json)` — ordinary code, same inputs same output. An LLM does not read the JSON as a prompt. Tools are the gate: intake may only call `evaluate`; it has no write/activate/approve. Manager may draft/simulate/activate; it has no ticket `approve`. Task 01 is proposed policy v1 contents, not a prompt. Recorded in task 01 and task 02.
+
+### You asked
+
+Add an example policy JSON file, auto-approve only, based on the policy notes.
+
+### I did
+
+`policy/auto-approve.example.json` — one allow rule from notes 1 and 2 (change of mind, 14 days, proposed $49 / tenure 3). Notes 3–7 not in the file. Linked from task 01. Not live.
+
+### You asked
+
+You combined notes 1 and 2 into one. Did `amount_usd_lte: 49` come from “small stuff from good customers”?
+
+### I gave
+
+Yes and yes. $49 is the proposed reading of “small stuff”; 3 is “good customer.” Neither number is in the notes. Note 2 is the 14-day change-of-mind window, not auto by itself. They stay AND in one allow rule so neither note pays alone. Split the example JSON so each `when` is tagged to its note.
+
+### You asked
+
+What tool can we create that will be able to handle it?
+
+### I gave
+
+One tool: `evaluate(request, policy)`. Closed operator table for the keys in `auto-approve.example.json`. Walk `allow` (OR) then `all_of` then `when` (AND). Unknown operator or bad parse → review. `simulate` is the same function on a list. Recorded in task 01. Not implemented.
+
+### You asked
+
+Talk through the system workflow. Admin: (1) policy page (2) download JSON, evaluate current policy on history, talk to an agent that asks guiding questions to fill the policy (3) see results/evaluation of the new policy and pick which policy to use. Reviewer page later.
+
+### I did
+
+Wrote that as the accepted admin journey in `tasks/02-manager-policy-change.md`. First boot: empty `allow`, all review. History “decisions” are `evaluate`, not the chat. Chat only drafts. Pick = activate. Reviewer page not opened yet. Not implemented.
+
+### You asked
+
+Create a plan under `plans/` of the coding order from the last response. Steps only; you will expand it.
+
+### I did
+
+`plans/coding-order.md` — parse → evaluate → history runner → policy page → chat → reviewer. Not implemented.
