@@ -4,7 +4,12 @@ Owner: project-product-manager
 Status: in-progress  
 Dependencies: none  
 Business outcome: Know what the sample columns can support, and what we should clean before we use them.  
-Acceptance checks: not set yet.
+Acceptance checks:
+- A read-only normalization run writes `data/processed/history.csv`; `data/raw/history.csv` remains byte-for-byte unchanged.
+- The processed copy retains the source columns, row order, and all 251 rows, including duplicate request rows; only `requested_at` and `amount_usd` are normalized.
+- Supported dates normalize to `DD/MM/YYYY`; missing, impossible, or unsupported values return invalid rather than a guessed date. Invalid rows must go to review, never approval.
+- Supported amounts normalize to exact `Decimal` numbers with two fractional digits and no currency marker or grouping comma. Missing, negative, malformed, or unsupported values return invalid and go to review.
+- Focused parser checks cover each accepted format, `12/06/2026`, malformed dates, currency-prefix/suffix/grouping examples, excess decimal precision, and invalid amounts.
 
 ## Evidence / results
 
@@ -81,6 +86,23 @@ The column is messy. Treat `yes` and `Y` as yes. History: `yes` 16, `Y` 4, `no` 
 - **`requested_at`:** `03/09/2026`, `12/06/2026`, `2026-06-15T07:11:00Z` → a date.
 - **Blank / broken:** `customer_id` (RF-2065), `tenure_months` (RF-2048, RF-2167), `days_since_delivery` (RF-2050). CU-2894 tenure 19 then 1.
 - **Duplicate `request_id`:** history RF-2040, RF-1019, RF-2111 (exact copies); pending RF-2183 (resubmit, not a copy).
+
+### Normalization decision for `requested_at` and `amount_usd`
+
+Decision for the processed copy: keep the original column names and normalize only these two values. Write dates as day-first dates (`DD/MM/YYYY`, for example, `30/06/2026`) and amounts as exact `Decimal` numbers with two fractional digits (for example, `43.00`), without a currency marker. Use `Decimal`, not binary floating point, for money.
+
+- **Dates accepted:** strict `YYYY-MM-DD`; strict `DD/MM/YYYY`; and UTC timestamps in the observed `YYYY-MM-DDTHH:MM:SSZ` form. Keep the UTC calendar date from a `Z` timestamp. Do not infer formats row by row. Adopt day-first for every slash date, so `12/06/2026` means 12 June 2026. Render every valid date as `DD/MM/YYYY`. A missing, impossible, or unsupported date is invalid; do not substitute a default or silently reinterpret it. The parser/evaluator must send an invalid row to review.
+- **Day-first assumption:** task notes identify the slash examples as `DD/MM/YYYY`, but no locale/source contract confirms that convention. Day-first is the chosen demo convention and makes ambiguous source values deterministic. If the source convention is later found to differ, revise the parser and rerun the tests; do not guess per value.
+- **Amounts accepted:** trim surrounding whitespace; accept unsigned digits with an optional decimal part of one or two digits and correctly grouped thousands commas, plus at most one optional USD marker (`$` prefix, or `USD` prefix/suffix). Parse the full string as a non-negative decimal. Reject missing values, negative signs, malformed grouping, unsupported currencies, more than two fractional digits, repeated/conflicting markers, or trailing text. Render valid values without grouping/currency markers, with two decimal places. An invalid amount is invalid input and must go to review, not approval.
+- **Unsupported dates:** timezone-less timestamps, non-UTC offsets, and timestamp variants not present in the sample are not accepted in this narrow pass. Add them only with an explicit convention and tests.
+
+### Normalization evidence / verification
+
+Read-only CSV inventory of `data/raw/history.csv`: 251 rows; 243 ISO dates, 4 slash dates, and 4 UTC `Z` timestamps. The chosen day-first convention renders RF-2025 `09/06/2026` → `09/06/2026`; RF-2031 `12/06/2026` → `12/06/2026`; RF-2073 `02/07/2026` → `02/07/2026`; RF-2137 `03/08/2026` → `03/08/2026`. The existing sample inventory is not runtime verification of the updated implementation.
+
+All 251 amount strings matched the bounded grammar and parsed as decimals. Eight contain non-plain formatting (whitespace or a currency marker), including `USD 120.00`, `$43`, `$36`, and `55.00 USD`. These are sample-inventory checks only: no processed copy was generated, no source-file checksum comparison was run, and the focused application/parser acceptance checks above remain unexecuted.
+
+Limitations: day-first is a documented demo assumption, not an externally confirmed source contract. The sample does not exercise malformed dates, invalid amounts, currency grouping, negative values, excessive precision, or non-UTC timestamps; those remain required parser test cases, not observed outcomes. The updated unit tests have not yet been executed in this environment.
 
 ### Every column
 
