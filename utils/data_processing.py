@@ -71,6 +71,27 @@ def _normalize_date_value(value: object) -> str | object:
     return pd.NA
 
 
+REASONS = frozenset({
+    "wrong_size",
+    "changed_mind",
+    "arrived_damaged",
+    "wrong_item",
+    "never_arrived",
+    "late_delivery",
+})
+REASON_ALIASES = {"late": "late_delivery", "damaged": "arrived_damaged"}
+_REASON_SEPARATORS = re.compile(r"[\s\-]+")
+
+
+def normalize_reason(value: object) -> str | None:
+    """Return one of the six dictionary reasons for a raw stated_reason, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    key = _REASON_SEPARATORS.sub("_", value.strip().casefold())
+    key = REASON_ALIASES.get(key, key)
+    return key if key in REASONS else None
+
+
 def normalize_date_column(df: pd.DataFrame, column_name: str) -> pd.DataFrame:
     """Normalize a date or timestamp column to DD/MM/YYYY in place."""
     df[column_name] = df[column_name].map(_normalize_date_value)

@@ -188,30 +188,30 @@ class PolicyPreviewTests(unittest.TestCase):
 
     def test_two_rule_fixture_exercises_or_and_conditions(self):
         rows = [
-            eligible_request(request_id="alpha", stated_reason="fixture_reason_alpha"),
+            eligible_request(request_id="alpha", stated_reason="wrong_size"),
             eligible_request(
                 request_id="beta",
-                stated_reason="fixture_reason_beta",
+                stated_reason="wrong_item",
                 amount_usd="$5.00",
             ),
             eligible_request(
                 request_id="alpha-high",
-                stated_reason="fixture_reason_alpha",
+                stated_reason="wrong_size",
                 amount_usd="$8.01",
             ),
             eligible_request(
                 request_id="alpha-fraud",
-                stated_reason="fixture_reason_alpha",
+                stated_reason="wrong_size",
                 fraud_flag="Y",
             ),
             eligible_request(
                 request_id="beta-high",
-                stated_reason="fixture_reason_beta",
+                stated_reason="wrong_item",
                 amount_usd="$5.01",
             ),
             eligible_request(
                 request_id="beta-note",
-                stated_reason="fixture_reason_beta",
+                stated_reason="wrong_item",
                 amount_usd="$5.00",
                 support_note="not blank",
             ),

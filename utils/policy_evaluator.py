@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
 
-from utils.data_processing import parse_amount
+from utils.data_processing import REASONS, normalize_reason, parse_amount
 
 
 _POLICY_KEYS = {"version", "status", "comment", "allow"}
@@ -25,7 +25,6 @@ _OPERATORS = {
     "request_id_not_already_paid",
 }
 _INTEGER_PATTERN = re.compile(r"[+-]?\d+")
-_WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
 def _policy_version(policy):
@@ -51,7 +50,8 @@ def _valid_amount_operand(value):
 
 def _valid_operand(operator, operand):
     if operator == "stated_reason":
-        return isinstance(operand, str) and bool(operand.strip())
+        # Policy operands must be canonical so a typo is invalid, not "0 affected".
+        return isinstance(operand, str) and operand in REASONS
     if operator in {"days_since_delivery_gte", "days_since_delivery_lte", "tenure_months_gte"}:
         return isinstance(operand, Integral) and not isinstance(operand, bool)
     if operator in {"amount_usd_gt", "amount_usd_lte"}:
@@ -130,16 +130,12 @@ def _parse_integer(value):
     return None
 
 
-def _reason_key(value):
-    return _WHITESPACE_PATTERN.sub("_", value.strip().casefold())
-
-
 def _evaluate_condition(operator, expected, request, already_paid_ids):
     if operator == "stated_reason":
-        value = request.get("stated_reason")
-        if not isinstance(value, str) or not value.strip():
+        reason = normalize_reason(request.get("stated_reason"))
+        if reason is None:
             return None, "invalid_request"
-        return _reason_key(value) == _reason_key(expected), "condition_not_met"
+        return reason == expected, "condition_not_met"
 
     if operator.startswith("days_since_delivery_") or operator == "tenure_months_gte":
         field = "days_since_delivery" if operator.startswith("days_since_delivery_") else "tenure_months"

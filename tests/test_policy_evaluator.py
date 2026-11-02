@@ -100,6 +100,26 @@ class PolicyEvaluatorTests(unittest.TestCase):
                     "approve_full",
                 )
 
+    def test_reason_alias_matches_canonical_rule(self):
+        result = evaluate(
+            eligible_request(stated_reason="late"),
+            make_policy({"stated_reason": "late_delivery"}),
+        )
+        self.assertEqual(result["decision"], "approve_full")
+
+    def test_unknown_request_reason_fails_closed(self):
+        result = evaluate(
+            eligible_request(stated_reason="unknown"),
+            make_policy({"stated_reason": "changed_mind"}),
+        )
+        self.assertEqual(result["decision"], "review")
+        self.assertEqual(result["reason"], "invalid_request")
+
+    def test_unknown_policy_reason_is_invalid_policy(self):
+        result = evaluate(eligible_request(), make_policy({"stated_reason": "chnaged_mind"}))
+        self.assertEqual(result["decision"], "review")
+        self.assertEqual(result["reason"], "invalid_policy")
+
     def test_amount_comparison_is_decimal_exact_and_parses_supported_currency_forms(self):
         policy = make_policy({"amount_usd_lte": Decimal("1234.50")})
 

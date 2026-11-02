@@ -10,7 +10,7 @@
         {
           "comment": "Synthetic fixture, not approved policy.",
           "when": {
-            "stated_reason": "fixture_reason_alpha",
+            "stated_reason": "wrong_size",
             "amount_usd_lte": 8.0
           }
         },
@@ -32,7 +32,7 @@
       "all_of": [
         {
           "when": {
-            "stated_reason": "fixture_reason_beta",
+            "stated_reason": "wrong_item",
             "amount_usd_lte": 5.0
           }
         },

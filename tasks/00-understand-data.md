@@ -108,6 +108,8 @@ Review H1 fix (2026-11-02): `utils/dataloader.py` now reads CSVs by path as text
 
 Review H2 fix (2026-11-02): the amount grammar now lives only in `parse_amount` in `utils/data_processing.py`. Both `data_processing` and `policy_evaluator` use it. `data_processing` quantizes to 0.01 only when it is lossless. Amounts with more than 2 decimals (for example `Decimal("43.123")` or float `43.123`) become NA, so they are never rounded. Added `ParseAmountTests` in `tests/test_data_processing.py` and `test_numeric_amounts_with_sub_cent_precision_are_rejected_not_rounded`. Full suite → `Ran 37 tests ... OK`. Loader→preview regression `test_history_example_policy_matches_known_ids` → ok (10 IDs).
 
+Review H3 fix (2026-11-02): added `normalize_reason` to `utils/data_processing.py`. It folds `late`/`damaged` and case, space, and hyphen variants to the six dictionary values, and returns None for anything else. The evaluator sends a None request reason to review with `invalid_request`, and it rejects any policy `stated_reason` that is not canonical (for example, `chnaged_mind`) as `invalid_policy`. The OR/AND fixture now uses `wrong_size`/`wrong_item`. Full suite → `Ran 43 tests ... OK`. Loader→preview regression still returns the same 10 IDs.
+
 ### Every column
 
 History is 251 rows (about Jun–Aug 2026). Pending is 21, all `decision=pending`. Dictionary: the files do not always match these definitions. Longer notes above stay; this is the rest worth knowing.

@@ -5,7 +5,13 @@ from decimal import Decimal
 
 import pandas as pd
 
-from utils.data_processing import normalize_data, normalize_date_column, parse_amount
+from utils.data_processing import (
+    REASONS,
+    normalize_data,
+    normalize_date_column,
+    normalize_reason,
+    parse_amount,
+)
 
 
 class NormalizeDataTests(unittest.TestCase):
@@ -186,6 +192,31 @@ class ParseAmountTests(unittest.TestCase):
         for value in cases:
             with self.subTest(value=value):
                 self.assertIsNone(parse_amount(value))
+
+
+class NormalizeReasonTests(unittest.TestCase):
+    def test_observed_variants_fold_to_dictionary_values(self):
+        cases = (
+            ("late", "late_delivery"),
+            ("damaged", "arrived_damaged"),
+            ("changed mind", "changed_mind"),
+            ("arrived damaged", "arrived_damaged"),
+            ("wrong item", "wrong_item"),
+            ("Never Arrived", "never_arrived"),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(normalize_reason(value), expected)
+
+    def test_canonical_values_pass_through(self):
+        for value in REASONS:
+            with self.subTest(value=value):
+                self.assertEqual(normalize_reason(value), value)
+
+    def test_unknown_blank_and_non_string_return_none(self):
+        for value in ("unknown", "", "   ", None, 3):
+            with self.subTest(value=value):
+                self.assertIsNone(normalize_reason(value))
 
 
 if __name__ == "__main__":
