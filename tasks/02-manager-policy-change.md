@@ -5,6 +5,43 @@ Status: in-progress
 Dependencies: task 01 closed policy schema and `validate_policy`; existing `utils.policy_preview` API; `data/raw/policy_notes.csv` and `data/raw/data_dictionary.csv` as policy/field context; the local pending-row source for previews; Streamlit conversation/session state and function-tool registration. A model provider call is permitted only when a provider/runtime is configured and data-sharing is approved.
 Business outcome: Let a Refund Operations Manager describe a policy change over conversation turns, resolve vague concepts into schema-supported values, then build, validate, and preview a draft through a deterministic Python function tool. This slice does not approve refunds or activate/version policy.
 
+## Completed slice: Streamlit UI shell (Part 2 reviewer + manager shell only) — 2026-11-02
+
+Owner: project-engineer  
+Status: **done for this shell slice only** (full manager draft/preview/tool workflow and reviewer queue remain incomplete; task overall stays `in-progress`)
+
+Scope: thin Streamlit multipage UI shell. No full reviewer queue, no draft/preview wiring, no `build_policy` registration, no activation UI, no auth/cloud/payments, no CSV rewriting, no LLM refund or policy activation.
+
+### Shell acceptance checks
+
+- [x] App title shown as **Refund System** (`page_title` in `main.py`).
+- [x] Exactly two navigable pages via Streamlit `st.navigation`: **Reviews** and **Policy Management**.
+- [x] **Reviews** is an empty placeholder (title + short note that the reviewer queue comes later). Reviews remains a stub pending a dedicated reviewer-queue brief.
+- [x] **Policy Management** chatbot UI keeps message history in Streamlit session state (`policy_management_messages`).
+- [x] `streamlit` listed in `requirements.txt` (alongside existing `pandas`).
+- [x] Offline/mock chatbot path: when `OPENAI_API_KEY` is unset (or even when set, this shell still replies with the offline mock), chat works with an honest labeled stub/echo. No customer request rows/notes are sent to a provider. Chatbot cannot approve refunds or activate/write live policy. `build_policy` is not registered or called.
+
+### Evidence / results
+
+- Changed/created artifacts: `main.py` (Streamlit entry + navigation), `pages/reviews.py`, `pages/policy_management.py`, `requirements.txt` (adds `streamlit`).
+- Exact install into the project venv: `.\.venv\Scripts\python.exe -m pip install streamlit`
+- Exact compile/smoke from the repository root:
+  ```powershell
+  .\.venv\Scripts\python.exe -m py_compile main.py pages\reviews.py pages\policy_management.py
+  .\.venv\Scripts\python.exe -c "import streamlit; from pathlib import Path; assert 'streamlit' in Path('requirements.txt').read_text(encoding='utf-8'); print(streamlit.__version__)"
+  .\.venv\Scripts\python.exe -m streamlit --version
+  ```
+  Observed: compile OK; streamlit **1.66.1**; `requirements_has_streamlit` True; pages `policy_management.py`, `reviews.py`; source checks for offline mock + session-history key OK.
+- Run command (local UI): `.\.venv\Scripts\python.exe -m streamlit run main.py` (or `streamlit run main.py` with the venv activated).
+
+### Remaining limitations (shell + overall task)
+
+- No real model provider chat; offline mock / echo only (even if an API key env var is present).
+- No `build_policy` Streamlit tool registration or invocation.
+- No draft retention, clarification agent, validate/preview wiring, or activation/versioning UI.
+- **Reviews** is an empty stub; reviewer queue requires a dedicated brief before implementation.
+- Full manager conversational acceptance checks below remain pending. Task overall: `in-progress`.
+
 Completed preview-utility acceptance checks:
 - [x] A valid policy file is parsed and evaluated by `utils/policy_evaluator.py`; values come from policy JSON, not constants copied from the example.
 - [x] Valid input returns a list of matching intake-only request rows, or an empty list when no rows match.
