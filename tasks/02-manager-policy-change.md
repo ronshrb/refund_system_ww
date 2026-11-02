@@ -1,29 +1,36 @@
-# 02 — Manager policy preview utility
+# 02 — Manager policy drafting and preview
 
 Owner: project-engineer (implementation); project-product-manager (acceptance)
 Status: in-progress
-Dependencies: task 01; current policy schema/evaluator; request-row input shape
-Business outcome: Let a manager preview, deterministically and offline, which supplied request rows match a supplied policy JSON file before any policy is considered for use. This is a preview utility, not the complete manager mechanism.
-Acceptance checks:
+Dependencies: task 01 closed policy schema and `validate_policy`; existing `utils.policy_preview` API; `data/raw/policy_notes.csv` and `data/raw/data_dictionary.csv` as policy/field context; the local pending-row source for previews; Streamlit conversation/session state and function-tool registration. A model provider call is permitted only when a provider/runtime is configured and data-sharing is approved.
+Business outcome: Let a Refund Operations Manager describe a policy change over conversation turns, resolve vague concepts into schema-supported values, then build, validate, and preview a draft through a deterministic Python function tool. This slice does not approve refunds or activate/version policy.
+
+Completed preview-utility acceptance checks:
 - [x] A valid policy file is parsed and evaluated by `utils/policy_evaluator.py`; values come from policy JSON, not constants copied from the example.
 - [x] Valid input returns a list of matching intake-only request rows, or an empty list when no rows match.
 - [x] Tests cover successful parsing, malformed JSON, invalid schema/unsupported operators, and fail-closed errors with no matches or approvals.
 - [x] Tests establish that `decision`, `decided_by`, `outcome_note`, `decided_at`, and `review_minutes` do not affect eligibility and are excluded from evaluator inputs and returned rows.
 - [x] The utility has no UI, LLM/provider calls, activation, live-file pointer, payment calls, source-data writes, or integration into `main.py`.
 
+Acceptance checks for the approved next slice (all pending):
+- [ ] The manager can describe a policy change across conversation turns, with the current draft retained in the Streamlit session.
+- [ ] Before any tool call, the agent asks targeted questions about vague concepts such as “good customers” or “small stuff” and guides the manager toward supported schema values such as amount ranges. It does not invent an unconfirmed threshold.
+- [ ] Only after required answers are clear does the agent call the Python function tool named `build_policy`, registered and invoked by Streamlit as the model tool. The tool receives a complete structured candidate, validates it, previews prior and candidate drafts on the same local pending cohort, and returns the updated draft with aggregate preview results.
+- [ ] Invalid candidates or failed previews are not presented as proposed drafts and do not replace the current session draft. The result contains aggregate counts/amounts and deltas only; request rows, IDs, customer fields, and notes remain local.
+- [ ] No CLI `main` or candidate-envelope file is part of this workflow. Conversation state and function arguments/results are handled in memory by the Streamlit flow.
+- [ ] No model provider call occurs unless a provider/runtime is configured and data-sharing is approved. Never send customer request rows or customer/support note text to a model provider. Keep an offline/mock path for tests and unconfigured use.
+- [ ] The agent/tool cannot approve or reject requests, call payments, write a live policy/pointer, or activate/version policy. Activation and versioning remain a future, separate explicit manager action.
+- [ ] Focused offline tests cover clarification-before-tool-call, multi-turn draft use, Streamlit function-tool registration/invocation, validation and preview ordering, identical preview cohorts, aggregate-only results, failure-state preservation, provider-call gating, and the absence of approval/activation capabilities. Tests for this approved flow have not been run.
+
 ## Completed slice: policy template
 
 Added `policy/policy.template.json` with version 1, draft status, an explanatory comment, and no allow-rules. It has not been loaded into the evaluator or used to process requests. The remaining manager workflow is still pending.
 
-## Bounded engineer handoff: deterministic policy preview
+## Completed slice: deterministic policy preview
 
-Implement one no-UI utility that accepts a policy JSON file path and request-row mappings. Parse the file with a JSON parser, validate it against the current closed schema in `utils/policy_evaluator.py`, and use `evaluate(request, policy)` as the sole eligibility decision. Do not copy thresholds from `policy/auto-approve.example.json`, duplicate matching rules, or add policy fields/operators beyond the evaluator's current schema.
+The no-UI preview utility is implemented. `parse_policy_file` validates through `validate_policy`; `preview_matching_rows(request_rows, policy_path, *, already_paid_ids)` calls `evaluate` as the sole eligibility decision, excludes the five post-decision fields, and returns projected matching rows without mutating inputs. The preview requires an explicit `already_paid_ids` collection. Its policy-file-path interface means the manager adapter must serialize each candidate to an ephemeral local JSON file before previewing it; do not create or replace a live policy file.
 
-Before each evaluator call, project each row to intake-available fields only. Exclude `decision`, `decided_by`, `outcome_note`, `decided_at`, and `review_minutes`; these post-decision fields must not affect eligibility. Return a Python list of projected rows whose evaluator result is `approve_full`. A valid policy with no matches returns `[]`. Do not mutate request rows or source CSV files.
-
-Malformed JSON, unreadable policy input, or structurally invalid/unsupported policy must fail closed: raise a clear policy-input error before emitting results, with no partial match list and no approvals. Reuse the evaluator's schema validation path. If validation must be callable independently to handle an empty request set, expose/reuse a narrow validator rather than creating a second schema.
-
-### Required focused tests
+### Existing focused utility checks
 
 - Parse a valid policy file and return a list of projected matches; verify a valid no-match case returns an empty list.
 - Use a valid fixture with policy values different from the example and verify changing a value changes results, proving eligibility is data-driven.
@@ -40,7 +47,7 @@ Malformed JSON, unreadable policy input, or structurally invalid/unsupported pol
   ```
   Observed result: RF-2005 ($42), RF-1009 ($14), RF-2032 ($49), RF-1015 ($27), RF-1026 ($12), RF-2072 ($17.72), RF-1046 ($26), RF-2119 ($48), RF-1055 ($23), RF-2171 ($11.86); count 10; total amount_usd $270.58. No post-decision fields were supplied and no paid IDs were inferred from history.
 - Executed checks: valid policy parsing preserved a numeric amount operand as `Decimal`; a matching row was returned as a list; a valid nonmatching policy returned `[]`; changing a custom amount limit from 7.00 to 8.00 changed the result; unreadable, malformed, invalid-schema, and unsupported-operator policy inputs raised `PolicyInputError`; an invalid policy was rejected before request-row iteration; all five post-decision fields did not affect eligibility and were absent from results; source row mappings were unchanged; already-paid IDs and all occurrences of repeated candidate IDs were excluded.
-- Remaining limitations: no UI or complete manager workflow; no activation, live pointer, payments, source-data writes, or integration; policy correctness and future-case safety are not established. The task remains `in-progress` for the full manager mechanism and independent review.
+- Remaining limitations: the agent instructions, prompts, and local CLI draft/validate/preview adapter are implemented and covered by offline tests. No model/provider runtime is configured or invoked, and prompt behavior has not been tested against a model. No UI, activation/versioning, live pointer, payments, source-data writes, or application integration are in this slice. Policy correctness and future-case safety are not established; the task remains `in-progress` pending independent review and the remaining manager workflow.
 
 ### Synthetic policy test fixtures — 2026-11-02
 
@@ -77,7 +84,112 @@ Executed from the repository root with the checked-in virtual environment on 202
 
 ### Explicit boundaries
 
-This is a deterministic preview utility, **not** the complete manager mechanism. No UI, LLM/provider calls, policy editing/versioning, live/draft comparison, activation, rollback, live-file pointer, reviewer queue, payment calls, source-data writes, or integration into `main.py`. It previews supplied rows against supplied policy data; it does not authorize refunds or establish that future cases are safe. Keep this task `in-progress` until the acceptance checks pass and evidence is recorded here.
+The deterministic preview utility is complete. The approved next slice is the Streamlit manager conversation and `build_policy` function tool. There is no activation/versioning UI, rollback, live-file pointer, reviewer queue, payment call, source-data write, or integration into `main.py` in this scope. A draft preview is not authorization to refund or evidence that future cases are safe. Keep this task `in-progress` until the new acceptance checks pass and evidence is recorded here.
+
+## Approved engineer handoff: conversational Streamlit manager flow
+
+1. Keep the manager's current draft and conversation in Streamlit session state. The manager describes a change over one or more turns.
+2. The agent first resolves ambiguity with targeted questions. For “good customers,” “small stuff,” or similar vague concepts, ask what the manager means and guide toward supported fields/operators and concrete values such as an amount range. Do not guess missing numbers or call the tool while required answers remain unclear.
+3. Once clear, the agent calls the Python function tool `build_policy` registered by Streamlit. Pass a complete structured candidate based on the current draft. The function validates it with `validate_policy`, previews current and candidate drafts against the same local pending cohort through `utils.policy_preview`, and returns the candidate plus aggregate preview results only after both previews succeed. A validation/preview failure leaves the session draft unchanged.
+4. Keep preview rows and customer data inside local code. Do not send customer request rows, IDs, customer fields, or customer/support note text to a model provider. Do not make a provider call unless a provider/runtime is configured and data-sharing is approved; retain an offline/mock path.
+5. Do not add a CLI `main` or candidate-envelope file. Prompt/agent files, if present, are behavior guidance only and do not configure a provider or runtime. The tool has no approval, rejection, payment, live-policy write, activation, or versioning capability. Activation/versioning require a future separate explicit manager action.
+
+**Implementation state:** `utils/policy_draft_tool.py` now exposes the stateless `build_policy` validation/preview function and the manager agent/prompts describe the clarification-first function-tool contract. The Streamlit host, session-state update logic, actual model-tool registration/invocation, and corresponding focused automated tests have not been implemented or verified. The existing `tests/test_policy_draft_tool.py` still targets the superseded CLI interface; its historical results do not satisfy the new acceptance checks.
+
+### Stateless function-tool adapter refactor — 2026-11-02
+
+Owner: project-engineer
+Status: in-progress
+
+Changed artifacts: `utils/policy_draft_tool.py` replaces `submit_policy_draft` and the CLI entry point with `build_policy(candidate_policy, current_draft, assumptions=(), cannot_express=())`. It validates both draft-status policies, returns unsupported requirements without loading or previewing pending rows, then loads one local cohort and previews the current and candidate drafts through temporary JSON paths with `already_paid_ids=set()`. Success returns the candidate draft, assumptions, and aggregate counts/totals/deltas only. The function does not persist session state or make provider calls. `.github/agents/policy-drafter.agent.md` and the start/update prompts now require ambiguity clarification before the Streamlit-registered function tool and update session state only when `status == "proposed"`.
+
+Executed from the repository root on 2026-11-02:
+
+- `& .\.venv\Scripts\python.exe -m py_compile utils\policy_draft_tool.py` — passed; no syntax errors.
+- `& .\.venv\Scripts\python.exe -m unittest tests.test_policy_preview tests.test_policy_evaluator` — 35 tests passed.
+- A mocked in-memory `build_policy` check passed. It verified a successful proposal and aggregate candidate total, absence of request/customer text in the result, one pending-row load shared by both previews, no load or preview for `cannot_express`, and no preview for an invalid-status candidate.
+- Real local pending-cohort smoke check, exact PowerShell command:
+  ```powershell
+  @'
+  import json
+  from pathlib import Path
+  from utils.policy_draft_tool import build_policy
+
+  draft = json.loads(Path("policy/policy.template.json").read_text(encoding="utf-8"))
+  result = build_policy(draft, draft)
+  print(result["status"], result.get("preview_summary"))
+  '@ | & .\.venv\Scripts\python.exe -
+  ```
+  Result: `proposed`; prior and candidate each had 0 matches and `$0.00`, with a 0 / `$0.00` delta. Only aggregate values were printed. No source CSV was modified.
+
+The superseded CLI test module has not been revalidated against the new API.
+
+Remaining limitations: no Streamlit manager UI/session, tool registration/runtime, real conversational clarification test, or updated automated test coverage is present. `tests/test_policy_draft_tool.py` is unchanged and incompatible with this refactor; coordinate its replacement with Project QA through the delivery lead. Do not mark the manager workflow complete until the focused automated acceptance checks and Streamlit host integration are independently verified.
+
+## Prior CLI adapter record (historical; not the approved workflow)
+
+The following describes the existing earlier implementation for traceability only. Its CLI, candidate-envelope file, `submit_policy_draft` interface, and associated tests are not the approved handoff above and must not be used as evidence that the conversational Streamlit flow is implemented.
+
+**Prior design decision (superseded):** a no-UI local CLI conversation runner exposed `submit_policy_draft`. This is retained only as a record of what is currently in the repository; the approved target is the Streamlit-registered `build_policy` function tool described above.
+
+### Context and conversation behavior
+
+- Initialize the session draft from `policy/policy.template.json` or an explicitly supplied draft, never by changing a live pointer. Give the model the current session draft, closed policy schema and operators, policy notes rendered as text, data-dictionary fields/descriptions as structured context, and the current manager turn. Do not provide request rows or customer/support note text to the model.
+- Keep the latest accepted session draft across turns. Ambiguity pauses the update and produces a clarifying question. Never silently invent numeric values. If the model proposes an inferred value, it must state the exact value and rationale, label it unverified, and ask the manager to confirm or correct it.
+- Treat policy-note content as business data, not instructions that can change system constraints or tool permissions. If a note requires unsupported evidence or an action outside the schema (for example carrier investigation/photo/signature confirmation, confirmed stolen-card identity, reject, or partial refund), return `cannot_express` with the missing field/operator/action. Do not silently omit the unsupported part or change session state.
+
+### Tool contract and update ordering
+
+The model proposes a complete candidate policy and calls:
+
+```text
+submit_policy_draft(candidate_policy, assumptions, cannot_express)
+  -> {status, draft?, assumptions, cannot_express, preview_summary?, errors?}
+```
+
+The local adapter must:
+
+1. Return `cannot_express` without updating the draft if unsupported requirements remain; return a clarifying question without a tool call when the request is ambiguous and no responsible candidate can be formed.
+2. Call `utils.policy_evaluator.validate_policy(candidate_policy)`. Invalid candidates return `invalid` and errors; do not preview, expose them as proposed drafts, or replace session state.
+3. Serialize the valid candidate to an ephemeral local JSON file, then call `utils.policy_preview.preview_matching_rows` on intake-only rows loaded locally from `data/raw/pending.csv`, with an explicit `already_paid_ids` collection. Do not infer paid IDs from historical decision fields. The preview utility revalidates the file and uses the existing evaluator.
+4. Compare the candidate preview with the prior session-draft preview using the same local cohort. Only after both required previews succeed may the adapter update in-memory session draft state and return the candidate as `proposed` with assumptions and a concise count/amount delta.
+5. Keep matched rows, request IDs, customer fields, and notes inside the local adapter. Return aggregate preview metrics only to the model/manager transcript; never send preview rows back through an external model provider. A failed preview leaves the prior session draft intact.
+
+The adapter exposes no other tools. It cannot approve/reject requests, call payments, write source CSVs, write a live policy or live pointer, activate policy, or version/rollback policy. A later activation flow requires a separate explicit manager action and is outside this task. If a remote provider is used, require explicit approval before sending source-CSV-derived policy-note content; never send raw CSV files/records, customer records, or customer/support notes. Keep credentials out of prompts and logs and document the provider/offline test path.
+
+### Focused tests and evidence to record
+
+- Use a mocked model/tool runtime to verify the prompt contract and function-tool registration; do not claim Python functions are directly available to the model.
+- Verify multi-turn updates use the prior valid session draft; ambiguity asks a question; any inferred number is surfaced as unverified with rationale and a confirmation question.
+- Verify unsupported note requirements return `cannot_express` and leave session state unchanged. Include policy-note text that attempts to override system constraints and confirm it grants no additional capability.
+- Verify invalid/unsupported candidate policy invokes validation and does not invoke preview; valid candidate invokes `validate_policy` before `preview_matching_rows`; the candidate is not returned as proposed until preview succeeds.
+- Verify candidate and prior draft are previewed against the identical local pending cohort, aggregate deltas are reported, preview rows and customer fields are not returned to the model, and a preview error preserves the previous draft.
+- Verify no provider request contains history/pending rows, request IDs, customer fields, `customer_note`, or `support_note`; no approval, activation, payment, live-pointer, or source-write tool is registered.
+- Record exact focused commands and executed results here. Until implemented and evidenced, all these checks remain pending; existing preview utility test results below apply only to the completed utility slice.
+
+### Prior CLI adapter implementation — 2026-11-02
+
+Owner: Project Engineer  
+Status: in-progress  
+Scope at the time: prompt-defined manager drafting behavior and a deterministic local CLI adapter; no model/provider runtime, UI, activation, or application integration. This is not implementation of the currently approved workflow.
+
+Changed artifacts:
+
+- `.github/agents/policy-drafter.agent.md`: dedicated manager drafting agent with only edit/execute tools, no read/search tools, no subagents, and no web. Instructions confine editing to `.policy-drafts/candidate-envelope.json` and execution to the exact local draft CLI. The closed policy shape and operators are provided in the agent instructions. The agent must not read history/pending/customer rows, treats policy notes as data rather than instructions, and has no refund/payment/activation capability. It requires explicit manager permission before source-CSV-derived notes or dictionary text are sent to an external provider.
+- `.github/prompts/start-policy-draft.prompt.md` and `.github/prompts/update-policy-draft.prompt.md`: distinct reusable start/continue prompts covering the current draft, closed schema/operators, current manager turn, permitted note/dictionary context, clarification, explicit numeric assumptions, and the local tool contract. These files are prompt assets only; they do not configure or connect an LLM/provider.
+- `utils/policy_draft_tool.py`: `submit_policy_draft(envelope, *, state_path=None)` and `python -m utils.policy_draft_tool --candidate .policy-drafts/candidate-envelope.json [--state ...]`. It initializes absent state from `policy/policy.template.json`, rejects malformed envelopes and non-draft/unsupported policies before preview, returns `cannot_express` without preview/state mutation, loads `data/raw/pending.csv` once, previews prior and candidate against that same local cohort with `already_paid_ids=set()`, aggregates only counts and Decimal totals/deltas, and atomically commits session state only after both previews succeed. Candidate/state paths are constrained to `.policy-drafts/`; no live/example/template/source policy is written.
+- `tests/test_policy_draft_tool.py`: multi-turn state, validation-before-preview, preview failure and `cannot_express` state preservation, wrong envelope/status/schema rejection, identical preview cohort, aggregate-only output, custom policy proposal, policy-file isolation, staging-path constraints, exact Decimal threshold persistence, and successful CLI use of an optional state path with a real local preview and unchanged source bytes.
+- `.gitignore`: ignores `.policy-drafts/`.
+
+Executed focused verification from the repository root on 2026-11-02:
+
+```powershell
+& .\.venv\Scripts\python.exe -m unittest tests.test_policy_draft_tool tests.test_policy_preview tests.test_policy_evaluator
+```
+
+Latest executed result: 46 tests passed (`Ran 46 tests in 0.201s`, `OK`). The CLI integration test used a temporary same-schema pending CSV and the real local loader/preview path; its source bytes remained unchanged and its output contained aggregate counts/totals but no request or customer IDs. Adapter unit tests mock the pending-row loader and preview function where appropriate. No live provider/model call was made.
+
+Historical acceptance evidence and limitations: the recorded 46-test result covers the old CLI/envelope implementation only. Prompt/agent files are behavior guidance; they do not configure or invoke an actual provider/runtime. No model runtime called the CLI or registered a tool, and no source notes/dictionary were sent to an external provider. The approved conversational clarification and Streamlit `build_policy` flow is not implemented and its tests are pending. Policy correctness, fairness, activation readiness, and future-case safety are not established. Task remains `in-progress`.
 
 ## Superseded full-manager design (reference only; not implementation scope)
 
@@ -279,3 +391,53 @@ Do not ship Drools, a visual rule builder, or “she can add any condition.” T
 ## Remaining limitations
 
 Not implemented. Not activated. Thresholds in the example JSON are from task 01 and stay proposed until accepted. Replay on `history.csv` is a preview of past rows, not a proof the next case is safe. This file does not authorize a refund.
+
+### Independent QA revalidation: manager drafting slice — 2026-11-02
+
+Owner: Project QA  
+Status: in-progress  
+Scope: independent read-only review of the manager agent/prompts, local draft adapter, focused tests, policy files, and ignore rule. No implementation files were changed.
+
+- Exact command from the repository root: `& .\.venv\Scripts\python.exe -m unittest tests.test_policy_draft_tool tests.test_policy_preview tests.test_policy_evaluator`
+- Result: 46 tests passed (`Ran 46 tests in 0.267s`, `OK`).
+- Verified in code/tests: candidate policy schema validation precedes preview; `cannot_express` and preview failure preserve an existing session draft; previews load `data/raw/pending.csv` once and use the same local rows for prior and candidate policies; output contains aggregate counts/totals/deltas, not rows or identifiers; the CLI candidate-envelope path and persisted state path are constrained under `.policy-drafts/`, which `.gitignore` excludes; proposal tests preserve template/example bytes and confirm no `policy/live.json` is created; the CLI test preserves pending-source bytes. The adapter's ephemeral prior/candidate policy JSON files used during preview are instead written to an OS temporary directory outside `.policy-drafts/`.
+- Static boundary review: the adapter uses only local loading, validation, and preview functions and has no activation, payment, or live-pointer operation. The agent and both prompts explicitly state they do not configure a model/provider or callable runtime. No model/provider calls are present in this slice. Prompt behavior remains textually specified, not runtime-tested.
+- Coverage gap: the invalid-candidate test confirms no session state is created, but does not seed an existing draft and assert it remains byte-for-byte unchanged. The implementation returns before state loading or writing, so no mutation path was observed, but this specific preservation assertion is not independently covered by the tests.
+- Recommendation: focused suite passes; retain `in-progress`. The ephemeral preview-policy path is a boundary mismatch if the path requirement covers every candidate policy file, and the invalid-candidate prior-state preservation assertion is not explicitly tested. Remaining manager workflow is also outstanding. This evidence does not establish policy correctness, production readiness, or activation readiness.
+
+### Bounded QA repairs: preview temp location and invalid-candidate preservation — 2026-11-02
+
+Owner: Project Engineer  
+Status: in-progress  
+Scope: address only the two QA findings above; no policy, prompt/agent, source-data, or other behavior changes.
+
+- `utils/policy_draft_tool.py`: prior and candidate preview JSON files are created inside the configured `DRAFT_DIRECTORY` using `tempfile.TemporaryDirectory(..., dir=DRAFT_DIRECTORY)`. The context manager removes the temporary directory after preview, including on failure.
+- `tests/test_policy_draft_tool.py`: `test_invalid_candidate_preserves_existing_state_without_preview` seeds a valid existing state file, captures its bytes, submits invalid candidates, then asserts the state bytes are identical and `preview_matching_rows` was never called.
+- Exact focused command from the repository root: `& .\.venv\Scripts\python.exe -m unittest tests.test_policy_draft_tool tests.test_policy_preview tests.test_policy_evaluator`
+- Executed result on 2026-11-02: 47 tests passed (`Ran 47 tests in 0.222s`, `OK`).
+- Remaining limitations: this closes only the two bounded QA findings. The manager workflow remains incomplete as recorded above; task remains `in-progress`.
+
+### Independent QA recheck: policy-draft adapter gaps — 2026-11-02
+
+Owner: Project QA  
+Status: in-progress  
+Scope: recheck only preview temporary-file location/cleanup and invalid-candidate state preservation; no code or test changes.
+
+- `test_preview_uses_one_pending_cohort_and_returns_aggregates_only` and `test_preview_failure_preserves_existing_state` assert that preview policy paths are under `.policy-drafts/` and no longer exist after preview completes, including the preview-failure case.
+- `test_invalid_candidate_preserves_existing_state_without_preview` seeds an existing state file, captures its bytes, submits invalid candidates, and asserts byte-for-byte preservation and that `preview_matching_rows` is not called.
+- Exact command from the repository root: `& .\.venv\Scripts\python.exe -m unittest tests.test_policy_draft_tool tests.test_policy_preview tests.test_policy_evaluator`
+- Executed result on 2026-11-02: 47 tests passed (`Ran 47 tests in 0.227s`, `OK`). Both requested gaps rechecked successfully.
+- Remaining risks: this confirms the stated local adapter behavior through focused tests only. It does not establish policy correctness or production readiness; the full manager workflow remains incomplete. Task remains `in-progress`.
+
+### Independent runtime QA revalidation: revised no-CLI manager tool — 2026-11-02
+
+Owner: Project QA
+Status: in-progress
+Scope: independently review the approved Streamlit handoff, current stateless adapter, focused tests, agent/prompts, and coding order; run only the requested focused unittest command. No code, tests, prompts, or agent files were changed.
+
+- Exact Windows PowerShell command from the repository root: `& .\.venv\Scripts\python.exe -m unittest tests.test_policy_draft_tool tests.test_policy_preview tests.test_policy_evaluator`
+- Runtime result: 41 tests passed (`Ran 41 tests in 0.073s`, `OK`).
+- Contract review: `build_policy(candidate_policy, current_draft, assumptions=(), cannot_express=())` exists. The implementation validates both current and candidate draft policies before returning `cannot_express`; that status skips pending-row loading and preview. The proposed path loads one local pending cohort and passes the same row collection to prior and candidate previews. It returns the candidate draft and aggregate counts, totals, and deltas, not preview rows or customer/request fields. The adapter has no `main`, `argparse`, candidate-envelope workflow, or persisted session state; its preview policy JSON files are temporary. The caller-supplied draft on a subsequent invocation is covered by the multi-turn adapter test.
+- File-safety evidence: the adapter has no write path to source CSVs or policy template/example/live files, and the focused tests contain no byte-snapshot assertions for those artifacts. A before/after hash attempt could not read `history.csv`, `pending.csv`, or `policy_notes.csv` because Windows reported that each was in use by another process. Therefore byte-for-byte unchanged status is not independently established by this run. The `policy/` directory contains the template and example only; no separate live policy file is present.
+- Agent and both prompt files identify `build_policy` as registered by the Streamlit host and state that prompt/agent files do not configure a provider/runtime. No Streamlit application or function-tool registration/invocation test is present. Registration, session-state ownership/update-on-`proposed`, and provider/runtime behavior remain not implemented or tested; these acceptance checks are still pending.
+- Remaining limitations: this focused suite verifies the local adapter only. It does not establish policy correctness, production readiness, or completion of the manager journey. Task remains `in-progress`.

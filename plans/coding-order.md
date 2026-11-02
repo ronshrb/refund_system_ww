@@ -1,10 +1,26 @@
 # Coding order
 
-Expand this later. Do not start with the agent, a UI shell, or the reviewer page.
+Build the smallest end-to-end slices first. Every result is a simulation; there are no real payment calls or policy activation in these steps.
 
-1. Parse a row (task 00 cleaning). Dirty CSV → structured fields or invalid. Do not rewrite the CSVs.
-2. `evaluate(parsed, policy)` — closed operators from task 01. Unknown key or bad parse → review. Empty `allow` → every row review.
-3. Tiny runner, no UI. `history.csv` twice: live `{ "allow": [] }` → 0 auto; `policy/auto-approve.example.json` → the 10 ids in task 01, nothing else.
-4. Policy page: download JSON, that runner as a table, pick a version.
-5. Chat last — writes a draft this function already understands.
-6. Reviewer page after that.
+1. **Parse input (task 00).** Read raw CSV values without pandas NA/float coercion. Normalize only the agreed fields; malformed or unknown values fail closed to review. Never rewrite source CSVs.
+2. **Evaluate one request (task 01).** Use the closed policy schema and supported operators. Mandatory safety rails run before policy `allow` rules. Return the decision, reason, policy version, matched rule, and exact `approved_amount`; malformed policy/request or failed rail means review. Policy thresholds remain data, not code constants.
+3. **UI-facing simulation service (no `main.py` CLI).** Build reusable functions for the future Streamlit UI to call; keep presentation in the UI layer. Build these substeps in order:
+	1. **Service inputs:** accept an input CSV path and policy JSON path from the caller. The Streamlit UI will select/default these; do not add a separate CLI entry point. Keep all CSV values as raw strings and never rewrite the source.
+	2. **Project and evaluate:** remove `decision`, `decided_by`, `outcome_note`, `decided_at`, and `review_minutes`; send only intake fields to the parser/evaluator. Return review for invalid rows.
+	3. **Handle batch duplicates:** if a `request_id` appears more than once in the input, route every occurrence to review; do not let order decide which copy passes.
+	4. **Persist simulated decisions:** use a local append-only log keyed by `request_id`; a previously logged approval must not be approved again on a rerun. Log the policy version, decision/reason, timestamp, and `approved_amount`. Label every entry as simulated; this is not a payment ledger.
+	5. **Return results to caller:** return structured per-row `request_id`, decision, reason/matched rule, and `approved_amount`, plus summary counts and total simulated amount. The Streamlit UI labels and renders these as simulations.
+	6. **Test new-file ingestion:** call the service on `pending.csv` and a temporary same-schema CSV. Verify malformed rows fail closed and the source files remain unchanged.
+	7. **Golden replay:** with an isolated temporary log, `{ "allow": [] }` on `history.csv` yields 0 matches and `policy/auto-approve.example.json` yields exactly the 10 IDs in task 01. Exclude all post-decision fields and never use historical decisions as labels. This is a replay check, not policy acceptance or activation.
+4. **Manager policy conversation (task 02).** The manager and agent iteratively refine a draft policy; this is a policy-authoring agent, not an intake agent.
+	1. **Start context:** give the agent the data dictionary, policy notes rendered as text, current draft policy, and the closed policy schema. Do not provide customer request rows or notes.
+	2. **Clarify:** the agent asks the manager about ambiguous or underspecified instructions, and records assumptions rather than inventing business values. If an instruction cannot fit the schema, return `cannot_express` and explain what structured field/operator is missing.
+	3. **Draft tool:** the agent calls `draft_policy(current_draft, manager_instruction, context)`. The tool returns a complete updated draft JSON plus assumptions or `cannot_express`; it never writes or replaces the active policy. Keep the draft available to the next conversation turn so the manager can add, change, or remove rules.
+	4. **Validate and preview:** validate every returned draft with the deterministic policy schema validator, then call the existing preview tool. Show which requests would match and how the draft differs from the previous draft/current policy. Invalid drafts cannot be previewed as approvals.
+	5. **Repeat:** show the draft and preview to the manager, take further instructions, and call `draft_policy` again until she is satisfied. Each update remains a draft.
+	6. **Boundaries:** the agent/tool gets no approve, payment, or activation capability. Sending policy notes is separate from sending customer records; never send customer rows/notes to an external provider without explicit approval. The manager activates through a separate explicit control after versioning, audit, and rollback are implemented.
+5. **Reviewer queue.** Open a dedicated task brief before implementation. Build the required queue, case context, reviewer options, and recorded aftermath. Reviewers handle every non-match or uncertain case. Do not let the agent remove cases from review.
+6. **Optional reviewer comments (task 03).** Only after the queue works. Comments are evidence-linked and advisory; the reviewer makes the decision. Keep external data sharing gated by explicit approval.
+7. **Deferred reason-alias suggestions (task 04).** Only after the required runner, manager, and reviewer mechanisms. An LLM may suggest an alias for an unknown reason, but a person must approve it before deterministic exact-match normalization uses it. Until then, unknown reasons stay in review.
+
+**Before any live activation:** review every proposed auto case against intake-available evidence; establish monitoring owners, denominators, baselines, targets, mature-outcome window, and rollback thresholds. Passing tests or matching historical decisions alone is not activation readiness.
