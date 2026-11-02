@@ -4,7 +4,14 @@ Owner: project-product-manager
 Status: in-progress  
 Dependencies: task 00  
 Business outcome: Pay a refund with no person only when every structured check is a sure yes, and leave the rest with a reviewer.  
-Acceptance checks: not set yet.
+Acceptance checks:
+- The evaluator is data-driven: supported thresholds and conditions come from the supplied policy JSON, not hardcoded business values. Malformed policy and unsupported operators fail closed.
+- Non-finite Decimal amount operands in direct policy mappings are rejected as invalid policy; NaN and positive/negative Infinity must never raise or approve.
+- An offline, policy-only replay on history passes the golden set: `{ "allow": [] }` yields zero auto-approvals; `policy/auto-approve.example.json` yields exactly the 10 request IDs recorded below, with no extras or duplicate approvals. Executed locally; see evidence below.
+- Evaluator request inputs are projected from history/pending without `decision`, `decided_by`, `outcome_note`, `decided_at`, or `review_minutes`. Focused tests establish that these fields cannot affect policy eligibility.
+- Focused fail-closed checks show that missing/invalid inputs, unknown rules, fraud yes/unknown, nonblank notes, and an explicitly supplied already-paid request ID cannot auto-approve. Keep idempotency context separate from evaluator request fields. Executed locally; see evidence below.
+- Before any activation, shadow-evaluate the implementation, review every proposed auto case against intake-available evidence, and establish named owners, denominators, baselines, targets, and rollback thresholds for post-launch monitoring. No activation or real payment is in scope here.
+- Record the evidence, exceptions, and remaining limitations below. Keep this task in-progress for remaining shadow-review and activation-readiness gates; production activation additionally requires policy acceptance and operational readiness.
 
 ## Proposed, not activated
 
@@ -15,6 +22,20 @@ Task 00 left the tenure cutoff open. The floor and the cap below are proposed. T
 `decided_by=auto` is observed behavior. It is not this list. Task 00 already marks some of those autos unsafe: blank tenure, `never_arrived`, messy fraud flags.
 
 This list is the **proposed contents of policy v1**, not a prompt. Auto-approve is a function over that JSON (task 02). An LLM does not read this list and decide. It does not update the live file. It does not pay.
+
+## Clarified implementation gate
+
+**Recommendation to the Project Delivery Lead: proceed with bounded implementation of a generic deterministic evaluator and offline simulation.** The user's clarification authorizes testing the evaluator against supplied policy JSON without accepting the example's 3-month tenure floor or $49 cap as production policy. Those values remain proposed data in `policy/auto-approve.example.json`; they must not be copied into evaluator code or treated as live settings.
+
+The evaluator may be generic over its documented, closed policy schema and supported operators. “Whatever policy JSON is supplied” means any valid policy within that schema; malformed JSON, unknown keys/operators, unsupported actions, or invalid values must fail closed to review. The offline simulator may read history and pending request data, but its evaluator request projection excludes all five named post-decision fields: `decision`, `decided_by`, `outcome_note`, `decided_at`, and `review_minutes`.
+
+Historical replay and idempotency are separate:
+
+- The 10-ID history golden-set replay is policy-only. It does not pass historical decisions or use them to determine eligibility. This keeps the expected cohort reproducible and avoids treating old decisions as labels.
+- Idempotency is a separate input/context, such as an explicit set of request IDs already paid or conservatively treated as resolved. Test it independently by showing a matching ID routes to review. Do not infer this context from a candidate row's own historical decision.
+- If historical `decision` is used to seed idempotency context for a pending-data simulation, use it only to add request IDs with `approved` or `partial` to a separate “potentially resolved” exclusion set. It must not be passed as a request field, change any rule result, or make another request more eligible. The sample is not a payment ledger, so this is a conservative duplicate-risk proxy, not proof that money moved; disclose this in simulation output. Do not use `decided_by`, `outcome_note`, `decided_at`, or `review_minutes` for this purpose.
+
+This authorization does **not** authorize activation, publishing a live policy, real payment calls, or claims that the proposed thresholds are accepted or safe for production. The reviewer remains the destination for every non-match and uncertain case.
 
 ## How auto-approve runs
 
@@ -148,6 +169,95 @@ Tenure at least 3. Task 00 says a 1–2 month account is new, blank tenure is un
 
 Amount at most $49. All 10 matches are at or under $49. The highest is RF-2032. Old auto never went above $54; that ceiling is observed, and this line does not adopt it. RF-2016 ($53) and RF-2044 ($54) would still be out at a $54 cap because each has a support note. The only in-window `changed_mind` above $54 is RF-1020 at $71 (human, day 14, tenure 4, note filled).
 
+## Gate evidence and decision
+
+The latest clarification expressly separates evaluator implementation from policy acceptance: implement thresholds as policy data and use the proposed example policy for offline simulation, without treating 3 months or $49 as accepted operating limits. The bounded evaluator/simulation scope above is implemented and its focused runtime checks passed. The example policy remains `proposed`; neither numeric value is accepted or activated.
+
+Independent read-only recomputation from `data/raw/history.csv` applied the stated reason, delivery-day, fraud, tenure, amount, identity, and blank-note gates. It found 10 rows and 10 unique IDs: RF-1009, RF-1015, RF-1026, RF-1046, RF-1055, RF-2005, RF-2032, RF-2072, RF-2119, RF-2171. All 10 were historically approved; 7 were marked auto and 3 were decided by a person. Their recorded amount totals $270.58. None has a nonblank `outcome_note`. The three duplicated history request IDs (RF-2040, RF-1019, RF-2111) are not matches. This independently supports the documented cohort count, not the correctness or safety of the proposed line.
+
+### Implementation evidence / results
+
+Changed artifacts: `utils/policy_evaluator.py` adds the closed-schema, data-driven evaluator and request projection, and now rejects non-finite Decimal amount thresholds during policy validation; `main.py` adds a no-UI offline CSV runner; `tests/test_policy_evaluator.py` adds evaluator, isolation, fail-closed, Decimal, idempotency, and duplicate-ID checks. No source CSV or policy JSON was changed.
+
+Executed commands from the repository root (Windows virtual environment):
+
+- `.\.venv\Scripts\python.exe -m unittest tests.test_policy_evaluator` — 9 tests passed.
+- `.\.venv\Scripts\python.exe -m unittest discover -s tests` — 17 tests passed.
+- `.\.venv\Scripts\python.exe main.py --policy-json '{"allow":[]}'` — 251 input rows; 0 auto rows; 251 review rows.
+- `.\.venv\Scripts\python.exe main.py --policy policy/auto-approve.example.json` — 251 input rows; 10 auto IDs; 241 review rows; policy status `proposed`; `simulation_only=true`; `payments_called=false`.
+
+The example replay emitted exactly these distinct IDs and no others: RF-2005, RF-1009, RF-2032, RF-1015, RF-1026, RF-2072, RF-1046, RF-2119, RF-1055, RF-2171. Duplicated history IDs RF-1019, RF-2040, and RF-2111 were routed to review. The replay did not seed idempotency from historical decisions. The isolated idempotency test supplied an already-paid ID separately and confirmed review; a duplicate-input test confirmed every occurrence is excluded from auto IDs.
+
+### Independent QA defect repair — 2026-11-02
+
+Changed only `_valid_operand` in `utils/policy_evaluator.py`: amount thresholds supplied as `Decimal` must now satisfy `is_finite()`. `Decimal('NaN')`, `Decimal('Infinity')`, and `Decimal('-Infinity')` are rejected while parsing policy, and `evaluate` returns `review` with reason `invalid_policy`. No QA-owned test was edited. The regression test initially reproduced QA's reported 2 failures and 1 error; after the repair it passes.
+
+Executed from the repository root with the checked-in virtual environment:
+
+- ` .\.venv\Scripts\python.exe -m unittest tests.test_policy_evaluator` — 10 tests passed.
+- ` .\.venv\Scripts\python.exe -m unittest discover -s tests` — 18 tests passed.
+- ` .\.venv\Scripts\python.exe main.py --policy-json '{"allow":[]}'` — exit 0; 251 rows, 0 auto, 251 review; duplicate IDs RF-1019, RF-2040, and RF-2111 routed to review.
+- ` .\.venv\Scripts\python.exe main.py --policy policy/auto-approve.example.json` — exit 0; 251 rows, 10 auto, 241 review; exact IDs RF-2005, RF-1009, RF-2032, RF-1015, RF-1026, RF-2072, RF-1046, RF-2119, RF-1055, RF-2171; `simulation_only=true`, `payments_called=false`.
+
+These are local evaluator and history-fixture checks only. Independent QA revalidation remains the next handoff; shadow review and operational readiness gates remain outstanding.
+
+Limitations and unexecuted gates: this is an offline simulation, not a payment or activation path. `pending.csv` simulation was not run in this slice. No proposed case has received independent shadow review, and named monitoring owners, denominators, baselines, targets, outcome-maturation window, and rollback thresholds are not established. The sample remains only 251 historical rows; past decisions are not ground-truth labels, and missing outcome notes do not prove absence of later harm. It does not establish that $49 is the right definition of “small” or that 3 months defines a “good customer”; all 10 matches have tenure at least 7 months. The 3-month floor and $49 cap remain explicitly unaccepted proposals.
+
+The user supplied the full assignment text, now summarized in `docs/assignment-brief.md`. The PDF remains the original source of truth, but the supplied text is sufficient for the requirements relevant to this task; no PDF-only requirement is being assumed.
+
+## Stop, revise, and rollback
+
+- **Implementation gate:** the bounded generic evaluator and offline history simulation are implemented and the focused runtime checks pass. Do not hardcode the example values. Keep this task in-progress until shadow review and remaining operational readiness gates are resolved.
+- **Stop before activation:** policy owner has not explicitly accepted/replaced the numeric values and full line; golden-set, field-isolation, and fail-closed checks are not passing; proposed auto cases have not been reviewed against intake-available evidence; or named monitoring owners, denominators, baselines, targets, outcome-maturation window, and rollback thresholds are not set. Never interpret a shadow approval as a real refund.
+- **Revise the line:** explicit policy interpretation changes; reviewer adjudication finds any proposed auto case ineligible on information available at intake; a valid edge case falls outside the accepted input contract; or later customer/financial outcomes show harm. Re-run the cohort and focused tests after each policy revision. Do not use historical decisions alone as correctness evidence.
+- **Pause/rollback after activation:** any evaluator/policy mismatch, approval on malformed or unknown input, duplicate payment, wrong amount, or approval of a case outside the accepted line triggers immediate disablement of auto-approval and review of affected cases. Monitor auto-approval count / total requests, auto-approved dollars, and adverse outcomes / auto-approvals with mature outcomes. Baselines, target thresholds, outcome-maturation window, and named operational owner are not established; set them before any live activation. Any material adverse-outcome signal against the agreed threshold also triggers pause and review.
+
+## Next dependency
+
+The bounded evaluator and history replay checks are complete. Activation remains blocked on explicit policy-owner acceptance or replacement of both numeric values, review of the proposed cases, and operational monitoring/rollback readiness. Pending-data simulation and broader shadow evaluation remain future work; the example-policy replay is a simulation, not activation.
+
+## Independent QA pass — 2026-11-02
+
+Owner: Project QA  
+Status: in-progress  
+Scope: independent Part 1 evaluator/runner validation. No application code was changed. Added one focused regression test in `tests/test_policy_evaluator.py`.
+
+### Finding for Engineering
+
+**Blocker — non-finite Decimal policy operands are not rejected.** `_valid_operand` accepts `Decimal` thresholds without checking `is_finite()`. A direct mapping with `amount_usd_lte: Decimal("Infinity")` approves the otherwise eligible $49 request. `Decimal("NaN")` raises `decimal.InvalidOperation` during evaluation instead of returning review, and `Decimal("-Infinity")` is accepted and reported as `no_allow_rule_matched` rather than invalid policy. Reject every non-finite Decimal amount operand while parsing policy, and preserve fail-closed review behavior. Regression test: `test_non_finite_decimal_policy_operands_fail_closed`.
+
+### Checks that passed
+
+- Post-decision isolation: `project_request` removes `decision`, `decided_by`, `outcome_note`, `decided_at`, and `review_minutes`; including those fields in the raw request did not change eligibility under the supported policy. Supported operators only read their fixed intake fields.
+- Duplicate IDs: runner routes every occurrence of an ID duplicated in one input file to review; focused runner test produced zero approvals for two otherwise eligible copies. Both golden replays routed RF-1019, RF-2040, and RF-2111 to review.
+- Empty policy golden: 251 rows, 0 auto, 251 review.
+- Example policy golden: 251 rows, 10 auto IDs (RF-2005, RF-1009, RF-2032, RF-1015, RF-1026, RF-2072, RF-1046, RF-2119, RF-1055, RF-2171), 241 review; `simulation_only=true`, `payments_called=false`.
+
+### Exact verification
+
+All commands ran from the repository root with the checked-in virtual environment on 2026-11-02.
+
+- Baseline `.\.venv\Scripts\python.exe -m unittest tests.test_policy_evaluator` — 9 tests passed before adding the regression.
+- Baseline `.\.venv\Scripts\python.exe -m unittest discover -s tests` — 17 tests passed before adding the regression.
+- `.\.venv\Scripts\python.exe main.py --policy-json '{"allow":[]}'` — exit 0; 251 rows, 0 auto, 251 review.
+- `.\.venv\Scripts\python.exe main.py --policy policy/auto-approve.example.json` — exit 0; 251 rows, 10 auto, 241 review, exact IDs listed above.
+- `.\.venv\Scripts\python.exe -m unittest tests.test_policy_evaluator` after adding the regression — 10 tests run; 2 failures and 1 error, all in the non-finite-operand subcases (Infinity approves, -Infinity is not rejected as invalid policy, NaN raises `InvalidOperation`).
+- `.\.venv\Scripts\python.exe -m unittest discover -s tests` after adding the regression — 18 tests run; the same 2 failures and 1 error.
+
+### Limits and handoff
+
+This verifies the local deterministic evaluator and the supplied history fixture only. It does not establish policy correctness, production safety, pending-data behavior, payment idempotency against a real ledger, or activation readiness. Do not repair or activate in QA; route the non-finite operand defect and regression to Engineering, then rerun the failing focused test, full suite, and both golden commands after repair. Keep this task `in-progress` until that revalidation and the existing shadow-review/operational gates are complete.
+
+## Decision options and assumptions
+
+- **Recommended:** implement the schema-bounded, data-driven evaluator and offline policy replay now. This tests deterministic behavior and the proposed JSON without endorsing its thresholds.
+- **More conservative alternative:** defer all evaluator work until the policy owner accepts both values. This avoids testing a draft policy but unnecessarily couples reusable evaluator mechanics to business approval.
+- **Not recommended:** hardcode 3 and $49, or treat the 10 historical matches as proof of policy correctness. That conflicts with the clarification and overstates what the sample shows.
+
+Assumptions: the example JSON defines the supported policy-schema baseline for this demo; policy values are reviewed as data; “already paid” is not directly observable in these CSVs. If history decisions seed a pending simulation's idempotency context, `approved` and `partial` mean only “potentially resolved; conservatively exclude,” not verified payment. A production-quality idempotency source is not present.
+
+Failure modes to test or disclose: malformed/unsupported policy accidentally approving; missing or invalid request fields silently passing; any of the five post-decision fields leaking into eligibility; candidate's own historical decision contaminating replay; false duplicate blocking from treating historical approvals as confirmed payments; repeated request IDs producing duplicate simulated approvals; or simulation results being mistaken for live authorization. Unknowns and ambiguity route to review.
+
 ## What would move this line
 
 - The user accepts or replaces the tenure floor. Task 00 did not accept one.
@@ -160,4 +270,4 @@ Amount at most $49. All 10 matches are at or under $49. The highest is RF-2032. 
 
 Counts are `history.csv` only: 251 rows, about Jun–Aug 2026. A past approval is not proof the next case is safe. This file does not authorize a refund.
 
-**Lead decision:** accept this allow-list as the proposed line. Tenure floor and $49 cap stay proposed. `wrong_size` stays off until someone chooses to add it: the same gates would be a wider set, and task 00 does not name that reason.
+`wrong_size` stays off until someone explicitly chooses to add it: the same gates would be a wider set, and task 00 does not name that reason.

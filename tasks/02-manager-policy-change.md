@@ -175,6 +175,14 @@ Only between her sentence and the schema:
 - output: a patch, a one-line interpretation, and “cannot express” if she asked for PayPal auto-reject or “trust Dana”
 - **no live pointer move**, no refund, no following `customer_note` (RF-1073 is there to catch that)
 
+For the initial policy draft, the same boundary can accept source context through a function rather than file uploads:
+
+```python
+draft_policy_from_notes(data_dictionary: dict[str, str], raw_policy_text: str) -> dict
+```
+
+`data_dictionary` contains field names and meanings as structured data. `raw_policy_text` contains the policy notes rendered as text from the source CSV; do not pass customer rows to this function. The prompt also supplies the closed policy schema and allowed operators. The result is a **draft response**, for example `{ "status": "draft", "policy": {...}, "assumptions": [...], "cannot_express": [...] }`; it is not the active policy file. Deterministic schema validation must reject unsupported fields/operators, and an operator must review the assumptions and preview the draft before any explicit activation. If the source text cannot be expressed safely in the schema, return `cannot_express` rather than inventing a rule. The LLM does not evaluate requests, write the live pointer, or authorize refunds.
+
 If the provider is down, she still has the form. Offline/mock path stays honest.
 
 ## What still needs an engineer

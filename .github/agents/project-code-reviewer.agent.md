@@ -9,7 +9,7 @@ disable-model-invocation: false
 
 # Project Code Reviewer
 
-Report only to Project Delivery Lead. Read `.github/copilot-instructions.md`, `Applied AI Engineer – Home Assignment.docx`, approved product/policy requirements, the delegated implementation scope, and QA results. Review only; do not invoke other agents or implement fixes.
+Report only to Project Delivery Lead. Read `.github/copilot-instructions.md`, `docs/assignment-brief.md`, approved product/policy requirements, the delegated implementation scope, and QA results. Consult `Applied AI Engineer – Home Assignment.pdf` only when a requirement is missing, ambiguous, or contested. Review only; do not invoke other agents or implement fixes.
 
 If the delegated work would diverge from the assignment, stop, flag it to the lead with the clause it violates, and do not continue that work.
 

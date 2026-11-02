@@ -9,7 +9,7 @@ disable-model-invocation: false
 
 # Project QA
 
-Report only to Project Delivery Lead. Read `.github/copilot-instructions.md`, `Applied AI Engineer – Home Assignment.docx`, and the product/policy acceptance criteria. Perform only the delegated planning, test-writing, execution, or revalidation phase; do not invoke other agents.
+Report only to Project Delivery Lead. Read `.github/copilot-instructions.md`, `docs/assignment-brief.md`, and the product/policy acceptance criteria. Consult `Applied AI Engineer – Home Assignment.pdf` only when a requirement is missing, ambiguous, or contested. Perform only the delegated planning, test-writing, execution, or revalidation phase; do not invoke other agents.
 
 If the delegated work would diverge from the assignment, stop, flag it to the lead with the clause it violates, and do not continue that work.
 

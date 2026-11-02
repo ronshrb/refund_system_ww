@@ -1,6 +1,6 @@
 # Refund Assignment Working Agreements
 
-Source of truth: `Applied AI Engineer – Home Assignment.docx` at the repo root. Read it before work. If this file and the brief disagree, follow the brief and say so.
+Source of truth: `Applied AI Engineer – Home Assignment.pdf` at the repo root. For routine work, use these working agreements, `docs/assignment-brief.md`, and the live task briefs; do not reread the PDF each time. Consult the PDF when a requirement is missing, ambiguous, or contested. If it conflicts with these agreements or a task brief, follow the PDF and update the affected summary.
 
 ## Assignment in one page
 
