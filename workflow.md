@@ -268,3 +268,16 @@ Create a plan under `plans/` of the coding order from the last response. Steps o
 ### I did
 
 `plans/coding-order.md` — parse → evaluate → history runner → policy page → chat → reviewer. Not implemented.
+
+### You asked
+
+Update the agents so they follow the assignment document and warn if a request goes against it or diverges from it.
+
+### I did
+
+Agent-config only. No application work.
+
+- `AGENTS.md` and `.github/copilot-instructions.md` — assignment digest plus stay-on-track protocol.
+- `.cursor/rules/assignment-track.mdc` — always-on: name the clause, warn before diverging.
+- Cursor and Copilot agent files — bound to the brief; refuse hard limits; flag soft divergences to you.
+- Delivery-lead workflow now follows live `tasks/` files (00, 01, 02), not stale names like `01-business-case.md`.

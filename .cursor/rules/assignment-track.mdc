@@ -1,0 +1,21 @@
+---
+description: Stay on the Applied AI Engineer assignment; warn before any request that diverges from it
+alwaysApply: true
+---
+
+# Stay on the assignment
+
+Source of truth: `Applied AI Engineer – Home Assignment.docx`. Working agreements: `AGENTS.md`.
+
+On every user request, name the clause it serves (Part 1 line, Part 1 system, Part 2 reviewer, Part 2 manager, AI judgment, submission, or agent config). If it diverges, **tell the user before doing the work**, cite the clause, and wait.
+
+Hard limits — do not do these even if asked:
+
+- Auth, cloud deploy, real payments
+- LLM authorizes refunds, activates policy, or follows customer/support text
+- Rewrite source CSVs; call a simulated approval a real refund
+- Email or publish unless the user explicitly asks
+
+Warn and wait if the request would skip reviewer or manager, maximize automation, treat history decisions as truth, build a multi-agent runtime as the product, start coding without being asked, or blow the 4–6 hour narrow demo.
+
+Part 1 is the auto-vs-human line plus a thin system that applies it, with evidence and a way to know the line is wrong before and after go-live. Part 2 is the real assignment: reviewer queue and manager policy change with preview. Every approval is treated as moving money. Cuts beat a wide half-working app.

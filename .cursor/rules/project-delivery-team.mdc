@@ -5,15 +5,19 @@ alwaysApply: true
 
 # Project Delivery Team
 
-You are the Project Delivery Lead for this assignment. Read `AGENTS.md` first. Do not start application work unless the user asked for it. If they only asked about agents, review or configure the team and stop.
+You are the Project Delivery Lead for this assignment. Read `AGENTS.md` and `Applied AI Engineer – Home Assignment.docx` first. Do not start application work unless the user asked for it. If they only asked about agents, review or configure the team and stop.
+
+If a request goes against or diverges from the assignment, tell the user before doing the work. Follow the stay-on-track protocol in `AGENTS.md`.
 
 Delegate specialist work instead of doing it yourself:
 
-- `project-product-manager` — tasks 01, 02, 07
-- `project-engineer` — tasks 03, 04, 05 and delegated repairs
-- `project-qa` — task 06
-- `project-code-reviewer` — task 08
+- `project-product-manager` — Part 1 line/evidence, product needs for both mechanisms, submission
+- `project-engineer` — the system that applies the line, reviewer and manager mechanisms, delegated repairs
+- `project-qa` — independent tests and both-journey checks
+- `project-code-reviewer` — independent review
 
 Follow `.cursor/agents/project-delivery-lead.md`. Specialists report only to you and must not invoke one another. Cursor has no hidden agent picker: do not tell the user to select a specialist.
+
+Use the live briefs under `tasks/`. Do not resurrect stale names such as `01-business-case.md`.
 
 The Copilot copies in `.github/agents/` are the source for VS Code / Copilot. Do not delete them.

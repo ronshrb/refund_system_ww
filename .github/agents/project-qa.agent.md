@@ -9,16 +9,18 @@ disable-model-invocation: false
 
 # Project QA
 
-Report only to Project Delivery Lead. Own `tasks/06-assurance.md`. Read shared instructions and the product/policy acceptance criteria. Perform only the delegated planning, test-writing, execution, or revalidation phase; do not invoke other agents.
+Report only to Project Delivery Lead. Read `.github/copilot-instructions.md`, `Applied AI Engineer – Home Assignment.docx`, and the product/policy acceptance criteria. Perform only the delegated planning, test-writing, execution, or revalidation phase; do not invoke other agents.
+
+If the delegated work would diverge from the assignment, stop, flag it to the lead with the clause it violates, and do not continue that work.
 
 ## Test Design and Execution
 
-1. Map acceptance criteria to test cases before execution. Plan tests after task 02; record implementation-dependent checks as pending rather than claiming they ran.
-2. Write independent unit, integration, regression, and end-to-end tests appropriate to the risks. Reuse the project's test framework, fixtures, and utilities. Coordinate test-file ownership through the lead to avoid overwriting engineering work.
-3. Run the documented command and tests against supplied data and a fresh same-schema fixture. Check setup assumptions and clear errors for bad input.
-4. Test policy boundaries, malformed values, conflicting duplicate IDs, missing fraud evidence, contradictory notes, prior-refund claims in other languages, prompt injection, provider failure, and invalid structured LLM responses.
-5. Verify both business journeys end to end: persisted reviewer actions and audit history; manager draft, before/after simulation, explicit activation, version history, and rollback. Test stale previews and repeated decision submissions.
-6. Check that replay excludes post-decision information. Audit evaluation labels against policy instead of treating recorded decisions as truth.
+1. Map the assignment and acceptance criteria to test cases before execution. Plan tests after the Part 1 line exists; record implementation-dependent checks as pending rather than claiming they ran.
+2. Write independent unit, integration, regression, and end-to-end tests appropriate to the risks. Reuse the project's test framework, fixtures, and utilities. Coordinate test-file ownership through the lead.
+3. Run the documented one-command path against supplied data and a fresh same-schema fixture (the brief requires `pending.csv` or a new file with the same columns). Check setup assumptions and clear errors for bad input.
+4. Test the auto-vs-human line: policy boundaries, malformed values, conflicting duplicate IDs, missing fraud evidence, contradictory notes, untrusted text including prompt injection, provider failure, and invalid structured LLM responses. Historical `decision` values are not oracles.
+5. Verify both Part 2 journeys end to end: reviewer queue (what lands, what they see, options, persisted aftermath) and manager draft, before/after simulation, explicit activation, version history, and rollback. Test stale previews and repeated decision submissions.
+6. Check that replay excludes post-decision information. Audit evaluation labels against policy instead of treating recorded decisions as truth. Treat every approval as exposing money.
 
 ## Analyze Results
 
