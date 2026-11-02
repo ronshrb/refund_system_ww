@@ -42,6 +42,39 @@ Malformed JSON, unreadable policy input, or structurally invalid/unsupported pol
 - Executed checks: valid policy parsing preserved a numeric amount operand as `Decimal`; a matching row was returned as a list; a valid nonmatching policy returned `[]`; changing a custom amount limit from 7.00 to 8.00 changed the result; unreadable, malformed, invalid-schema, and unsupported-operator policy inputs raised `PolicyInputError`; an invalid policy was rejected before request-row iteration; all five post-decision fields did not affect eligibility and were absent from results; source row mappings were unchanged; already-paid IDs and all occurrences of repeated candidate IDs were excluded.
 - Remaining limitations: no UI or complete manager workflow; no activation, live pointer, payments, source-data writes, or integration; policy correctness and future-case safety are not established. The task remains `in-progress` for the full manager mechanism and independent review.
 
+### Synthetic policy test fixtures — 2026-11-02
+
+Changed artifacts: `tests/fixtures/policies/empty_allow.json`, `changed_mind_narrow.json`, `allow_or_all_of_and.json`, and `unsupported_operator.json`; `tests/test_policy_preview.py`; `tests/test_policy_evaluator.py`. Every fixture has `status: test` and explicitly says it is synthetic and not approved policy. The narrow changed_mind fixture uses a test-only $8 cap and supported evaluator conditions; the two-rule fixture uses synthetic reason values to test allow-list OR and condition AND. The unsupported-operator fixture is valid JSON and rejected by the closed schema. No production/example/template policy was changed, and these fixtures make no real-world policy recommendation.
+
+Exact focused command from the repository root: `.\.venv\Scripts\python.exe -m unittest tests.test_policy_preview tests.test_policy_evaluator` — 20 tests passed on 2026-11-02. This is local test evidence only; it does not establish production readiness or policy acceptance.
+
+Additional synthetic fixtures: `changed_mind_delivery_window.json`, `tenure_floor_customer_unpaid.json`, and `blank_notes_fraud_clear.json`. Each has `status: test` and explicitly says it is synthetic and not approved policy; all thresholds are test values only. `tests/test_policy_preview.py` uses in-memory rows to verify a match and nearby non-matches for each fixture, including both delivery-day bounds with amount/fraud, the tenure floor with customer/already-paid checks, and blank customer/support notes with fraud state. No dataset replay was run and no source, example, or template policy was changed.
+
+Exact focused command from the repository root: `.\.venv\Scripts\python.exe -m unittest tests.test_policy_preview tests.test_policy_evaluator` — 23 tests passed on 2026-11-02.
+
+### Focused runtime revalidation — 2026-11-02
+
+Owner: Project QA
+Scope: runtime revalidation only; no code or fixture changes.
+
+- Exact Windows PowerShell command from the repository root: `& .\.venv\Scripts\python.exe -m unittest tests.test_policy_preview tests.test_policy_evaluator`
+- Result: 23 tests passed (`Ran 23 tests in 0.034s`, `OK`).
+- This confirms the focused local preview/evaluator test suite runs in the checked-in virtual environment. It does not establish policy acceptance, production readiness, or completion of the full manager mechanism. Task remains `in-progress`.
+
+### Independent QA revalidation — 2026-11-02
+
+Owner: Project QA
+Status: in-progress
+Scope: read-only review of the four synthetic policy fixtures and the focused preview/evaluator tests; no code or fixture changes.
+
+- All four fixtures have `status: test` and explicitly identify themselves as synthetic and not approved policy.
+- `empty_allow.json` is checked by preview and evaluator tests to return no matches / route to review.
+- `changed_mind_narrow.json` is checked with a matching row, a $8.01 non-match against its test-only $8 cap, and changed $7/$8 policy values that change eligibility. Its supported reason, delivery window, amount, tenure, fraud, customer/note, and already-paid conditions are represented in the fixture.
+- `allow_or_all_of_and.json` is checked with one matching row per rule. The negative alpha amount/fraud cases and beta amount/support-note cases establish that each rule's conditions must all pass, while either rule can match.
+- `unsupported_operator.json` contains valid JSON with `amount_usd_gte`; preview parsing and evaluator validation both assert fail-closed rejection.
+
+Executed from the repository root with the checked-in virtual environment on 2026-11-02: `.\.venv\Scripts\python.exe -m unittest tests.test_policy_preview tests.test_policy_evaluator` — 20 tests passed. This independently confirms the recorded fixture/test intent and local behavior only; it does not establish policy acceptance, production readiness, or activation readiness. Task remains `in-progress`.
+
 ### Explicit boundaries
 
 This is a deterministic preview utility, **not** the complete manager mechanism. No UI, LLM/provider calls, policy editing/versioning, live/draft comparison, activation, rollback, live-file pointer, reviewer queue, payment calls, source-data writes, or integration into `main.py`. It previews supplied rows against supplied policy data; it does not authorize refunds or establish that future cases are safe. Keep this task `in-progress` until the acceptance checks pass and evidence is recorded here.

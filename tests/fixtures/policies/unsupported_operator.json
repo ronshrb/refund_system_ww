@@ -1,0 +1,19 @@
+{
+  "version": "test-unsupported-operator",
+  "status": "test",
+  "comment": "Synthetic fixture, not approved policy. Syntactically valid JSON with an unsupported operator for fail-closed validation tests.",
+  "allow": [
+    {
+      "id": "synthetic-unsupported",
+      "action": "approve_full",
+      "all_of": [
+        {
+          "comment": "Synthetic fixture, not approved policy.",
+          "when": {
+            "amount_usd_gte": 0.01
+          }
+        }
+      ]
+    }
+  ]
+}

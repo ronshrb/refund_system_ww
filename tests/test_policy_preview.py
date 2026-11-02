@@ -13,6 +13,8 @@ from utils.policy_preview import (
     preview_matching_rows,
 )
 
+POLICY_FIXTURES = Path(__file__).parent / "fixtures" / "policies"
+
 
 def eligible_request(**overrides):
     request = {
@@ -31,26 +33,8 @@ def eligible_request(**overrides):
     return request
 
 
-def policy_data(amount_limit="8.00"):
-    return {
-        "version": 21,
-        "status": "draft",
-        "allow": [{
-            "id": "preview-rule",
-            "action": "approve_full",
-            "all_of": [{"when": {
-                "stated_reason": "changed_mind",
-                "days_since_delivery_lte": 14,
-                "amount_usd_lte": float(amount_limit),
-                "tenure_months_gte": 4,
-                "fraud_flag": "no",
-                "customer_id_present": True,
-                "customer_note_blank": True,
-                "support_note_blank": True,
-                "request_id_not_already_paid": True,
-            }}],
-        }],
-    }
+def policy_fixture(name):
+    return POLICY_FIXTURES / name
 
 
 class PolicyPreviewTests(unittest.TestCase):
@@ -64,34 +48,58 @@ class PolicyPreviewTests(unittest.TestCase):
         return self.policy_path
 
     def test_parser_retains_decimal_policy_operands_and_preview_returns_list(self):
-        policy_text = json.dumps(policy_data())
-        self.write_policy(policy_text)
+        policy_path = policy_fixture("changed_mind_narrow.json")
 
-        policy = parse_policy_file(self.policy_path)
+        policy = parse_policy_file(policy_path)
         matches = preview_matching_rows(
-            [eligible_request()], self.policy_path, already_paid_ids=set()
+            [eligible_request()], policy_path, already_paid_ids=set()
         )
 
-        self.assertIsInstance(policy["allow"][0]["all_of"][0]["when"]["amount_usd_lte"], Decimal)
+        amount_operand = next(
+            group["when"]["amount_usd_lte"]
+            for group in policy["allow"][0]["all_of"]
+            if "amount_usd_lte" in group["when"]
+        )
+        self.assertIsInstance(amount_operand, Decimal)
         self.assertIsInstance(matches, list)
         self.assertEqual(matches, [eligible_request()])
 
     def test_valid_no_match_returns_empty_list(self):
-        self.write_policy(json.dumps(policy_data(amount_limit="7.00")))
-
         self.assertEqual(
             preview_matching_rows(
-                [eligible_request()], self.policy_path, already_paid_ids=set()
+                [eligible_request(amount_usd="$8.01")],
+                policy_fixture("changed_mind_narrow.json"),
+                already_paid_ids=set(),
+            ),
+            [],
+        )
+
+    def test_empty_allow_fixture_returns_no_matches(self):
+        self.assertEqual(
+            preview_matching_rows(
+                [eligible_request()],
+                policy_fixture("empty_allow.json"),
+                already_paid_ids=set(),
             ),
             [],
         )
 
     def test_non_example_policy_value_changes_match_result(self):
-        self.write_policy(json.dumps(policy_data(amount_limit="7.00")))
+        policy = json.loads(
+            policy_fixture("changed_mind_narrow.json").read_text(encoding="utf-8")
+        )
+        amount_conditions = next(
+            group["when"]
+            for group in policy["allow"][0]["all_of"]
+            if "amount_usd_lte" in group["when"]
+        )
+        amount_conditions["amount_usd_lte"] = 7.00
+        self.write_policy(json.dumps(policy))
         lower_limit_matches = preview_matching_rows(
             [eligible_request()], self.policy_path, already_paid_ids=set()
         )
-        self.write_policy(json.dumps(policy_data(amount_limit="8.00")))
+        amount_conditions["amount_usd_lte"] = 8.00
+        self.write_policy(json.dumps(policy))
         higher_limit_matches = preview_matching_rows(
             [eligible_request()], self.policy_path, already_paid_ids=set()
         )
@@ -118,14 +126,6 @@ class PolicyPreviewTests(unittest.TestCase):
         for contents in (
             "{",
             json.dumps({"version": 1, "allow": [], "unknown": True}),
-            json.dumps({
-                "version": 1,
-                "allow": [{
-                    "id": "bad-op",
-                    "action": "approve_full",
-                    "all_of": [{"when": {"unknown_operator": True}}],
-                }],
-            }),
         ):
             with self.subTest(contents=contents):
                 self.write_policy(contents)
@@ -134,8 +134,16 @@ class PolicyPreviewTests(unittest.TestCase):
                         [eligible_request()], self.policy_path, already_paid_ids=set()
                     )
 
+        unsupported_path = policy_fixture("unsupported_operator.json")
+        self.assertIsInstance(
+            json.loads(unsupported_path.read_text(encoding="utf-8")), dict
+        )
+        with self.assertRaisesRegex(PolicyInputError, "invalid or unsupported schema"):
+            preview_matching_rows(
+                [eligible_request()], unsupported_path, already_paid_ids=set()
+            )
+
     def test_post_decision_fields_do_not_affect_or_appear_in_results(self):
-        self.write_policy(json.dumps(policy_data()))
         base = eligible_request()
         with_post_decision = eligible_request(
             decision="rejected",
@@ -147,9 +155,10 @@ class PolicyPreviewTests(unittest.TestCase):
         base_before = deepcopy(base)
         post_decision_before = deepcopy(with_post_decision)
 
-        base_matches = preview_matching_rows([base], self.policy_path, already_paid_ids=set())
+        policy_path = policy_fixture("changed_mind_narrow.json")
+        base_matches = preview_matching_rows([base], policy_path, already_paid_ids=set())
         post_decision_matches = preview_matching_rows(
-            [with_post_decision], self.policy_path, already_paid_ids=set()
+            [with_post_decision], policy_path, already_paid_ids=set()
         )
 
         self.assertEqual(base_matches, post_decision_matches)
@@ -161,21 +170,114 @@ class PolicyPreviewTests(unittest.TestCase):
         self.assertEqual(with_post_decision, post_decision_before)
 
     def test_candidate_duplicate_ids_and_already_paid_ids_are_excluded(self):
-        self.write_policy(json.dumps(policy_data()))
         duplicated = [eligible_request(), eligible_request(amount_usd="$6.00")]
+        policy_path = policy_fixture("changed_mind_narrow.json")
 
         self.assertEqual(
-            preview_matching_rows(duplicated, self.policy_path, already_paid_ids=set()),
+            preview_matching_rows(duplicated, policy_path, already_paid_ids=set()),
             [],
         )
         self.assertEqual(
             preview_matching_rows(
                 [eligible_request()],
-                self.policy_path,
+                policy_path,
                 already_paid_ids={"RF-preview"},
             ),
             [],
         )
+
+    def test_two_rule_fixture_exercises_or_and_conditions(self):
+        rows = [
+            eligible_request(request_id="alpha", stated_reason="fixture_reason_alpha"),
+            eligible_request(
+                request_id="beta",
+                stated_reason="fixture_reason_beta",
+                amount_usd="$5.00",
+            ),
+            eligible_request(
+                request_id="alpha-high",
+                stated_reason="fixture_reason_alpha",
+                amount_usd="$8.01",
+            ),
+            eligible_request(
+                request_id="alpha-fraud",
+                stated_reason="fixture_reason_alpha",
+                fraud_flag="Y",
+            ),
+            eligible_request(
+                request_id="beta-high",
+                stated_reason="fixture_reason_beta",
+                amount_usd="$5.01",
+            ),
+            eligible_request(
+                request_id="beta-note",
+                stated_reason="fixture_reason_beta",
+                amount_usd="$5.00",
+                support_note="not blank",
+            ),
+        ]
+
+        matches = preview_matching_rows(
+            rows,
+            policy_fixture("allow_or_all_of_and.json"),
+            already_paid_ids=set(),
+        )
+
+        self.assertEqual([row["request_id"] for row in matches], ["alpha", "beta"])
+
+    def test_delivery_window_fixture_matches_and_rejects_nearby_conditions(self):
+        rows = [
+            eligible_request(
+                request_id="window-match",
+                days_since_delivery="7",
+                amount_usd="$31.25",
+                fraud_flag="no",
+            ),
+            eligible_request(request_id="window-before-floor", days_since_delivery="4"),
+            eligible_request(request_id="window-after-ceiling", days_since_delivery="10"),
+            eligible_request(request_id="window-over-amount", amount_usd="$31.26"),
+            eligible_request(request_id="window-fraud", fraud_flag="Y"),
+        ]
+
+        matches = preview_matching_rows(
+            rows,
+            policy_fixture("changed_mind_delivery_window.json"),
+            already_paid_ids=set(),
+        )
+
+        self.assertEqual([row["request_id"] for row in matches], ["window-match"])
+
+    def test_tenure_floor_fixture_checks_customer_and_already_paid(self):
+        rows = [
+            eligible_request(request_id="tenure-match", tenure_months="12"),
+            eligible_request(request_id="tenure-below-floor", tenure_months="11"),
+            eligible_request(request_id="tenure-no-customer", tenure_months="12", customer_id=" "),
+            eligible_request(request_id="tenure-paid", tenure_months="12"),
+        ]
+
+        matches = preview_matching_rows(
+            rows,
+            policy_fixture("tenure_floor_customer_unpaid.json"),
+            already_paid_ids={"tenure-paid"},
+        )
+
+        self.assertEqual([row["request_id"] for row in matches], ["tenure-match"])
+
+    def test_blank_notes_fraud_fixture_rejects_filled_notes_and_fraud(self):
+        rows = [
+            eligible_request(request_id="notes-match"),
+            eligible_request(request_id="notes-customer-filled", customer_note="details"),
+            eligible_request(request_id="notes-support-filled", support_note="details"),
+            eligible_request(request_id="notes-fraud", fraud_flag="yes"),
+        ]
+
+        matches = preview_matching_rows(
+            rows,
+            policy_fixture("blank_notes_fraud_clear.json"),
+            already_paid_ids=set(),
+        )
+
+        self.assertEqual([row["request_id"] for row in matches], ["notes-match"])
 
 
 if __name__ == "__main__":

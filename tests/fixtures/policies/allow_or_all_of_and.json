@@ -1,0 +1,47 @@
+{
+  "version": "test-allow-or-all-of-and",
+  "status": "test",
+  "comment": "Synthetic fixture, not approved policy. Exercises allow-list OR and all_of/when AND behavior only.",
+  "allow": [
+    {
+      "id": "synthetic-alpha",
+      "action": "approve_full",
+      "all_of": [
+        {
+          "comment": "Synthetic fixture, not approved policy.",
+          "when": {
+            "stated_reason": "fixture_reason_alpha",
+            "amount_usd_lte": 8.0
+          }
+        },
+        {
+          "when": {
+            "fraud_flag": "no"
+          }
+        },
+        {
+          "when": {
+            "customer_note_blank": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "synthetic-beta",
+      "action": "approve_full",
+      "all_of": [
+        {
+          "when": {
+            "stated_reason": "fixture_reason_beta",
+            "amount_usd_lte": 5.0
+          }
+        },
+        {
+          "when": {
+            "support_note_blank": true
+          }
+        }
+      ]
+    }
+  ]
+}

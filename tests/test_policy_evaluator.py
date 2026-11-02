@@ -1,9 +1,17 @@
 """Focused contract tests for the standalone deterministic policy evaluator."""
 
+import json
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
 from utils.policy_evaluator import evaluate
+
+POLICY_FIXTURES = Path(__file__).parent / "fixtures" / "policies"
+
+
+def load_policy_fixture(name):
+    return json.loads((POLICY_FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def make_policy(when, *, rule_id="rule-1", version=12):
@@ -117,7 +125,7 @@ class PolicyEvaluatorTests(unittest.TestCase):
         policies = (
             {"version": 1, "allow": [], "unexpected": True},
             {"version": 1, "allow": [{"id": "x", "action": "refund", "all_of": []}]},
-            make_policy({"unknown_operator": True}),
+            load_policy_fixture("unsupported_operator.json"),
             make_policy({"amount_usd_lte": "49"}),
             make_policy({"customer_note_blank": False}),
             make_policy({"fraud_flag": "maybe"}),
@@ -179,7 +187,7 @@ class PolicyEvaluatorTests(unittest.TestCase):
 
     def test_empty_allow_list_routes_to_review(self):
         self.assertEqual(
-            evaluate(eligible_request(), {"version": 1, "allow": []})["decision"],
+            evaluate(eligible_request(), load_policy_fixture("empty_allow.json"))["decision"],
             "review",
         )
 

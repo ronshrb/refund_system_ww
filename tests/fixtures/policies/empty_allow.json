@@ -1,0 +1,6 @@
+{
+  "version": "test-empty-allow",
+  "status": "test",
+  "comment": "Synthetic fixture, not approved policy. Empty allow-list for evaluator and preview tests.",
+  "allow": []
+}
