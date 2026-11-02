@@ -9,6 +9,11 @@ few thought from going over history.csv:
 
 
 
+questions:
+1. what is considered a good customer?
+2. 
+
+
 first step: classify as auto approve
 "Change of mind: we accept returns within 14 days of delivery. No exceptions." - days_since_delivery <= 14
 or

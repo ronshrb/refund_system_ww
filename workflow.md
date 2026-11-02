@@ -204,3 +204,19 @@ Create task 01. Decide what should automatically approve, using only task 00 and
 ### I did
 
 Delegated it to the product manager. Accepted the proposed allow-list in `tasks/01-auto-approve.md`: change of mind, day 0–14, fraud cleans to no, tenure at least 3, amount at most $49, customer id present, both notes blank, not already paid. 10 history rows match, all previously approved, none with a later chargeback or appeal. Not activated. `wrong_size` stays off.
+
+### You asked
+
+How the Refund Operations Manager changes what the system does without an engineer (stolen-card through; anything over $300 to review; expect others), and how she knows before it goes live. A settings page of knobs still felt hardcoded. How to implement it.
+
+### I gave
+
+Policy as versioned data, not `if amount > 300` in Python. Closed schema (rails then allow-list). Draft → replay live vs draft on history and pending → she Activate. Rollback is the previous pointer. LLM may draft a structured patch; it must not go live. “Over $300” is a review rail, not raising the $49 cap. “Stolen-card through” is underspecified and dangerous if it auto-pays unconfirmed fraud (RF-1070, RF-2182). If a sentence does not fit the schema, say it needs an engineer.
+
+### You asked
+
+Open a task for that. We will pick it up later. Write what I wrote here.
+
+### I did
+
+`tasks/02-manager-policy-change.md` — not-started, deferred. Design only. No implementation.
