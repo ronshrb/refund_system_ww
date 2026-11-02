@@ -295,3 +295,14 @@ Executed from the repository root on 2026-11-02: `.\.venv\Scripts\python.exe -m 
 Not executed in this slice: history or pending replay, the full test suite, application/CSV runner, shadow review, or activation-readiness checks. No application file, source CSV, or policy JSON was changed. The proposed example policy remains unaccepted and inactive.
 
 Next dependency: independently review this evaluator contract, then obtain separate authorization for any application integration and request projection. Policy-owner acceptance, shadow review, and operational monitoring/rollback readiness remain required before any activation.
+
+## Code review B1/B2 repair — 2026-11-02
+
+Owner: project-engineer. Status: `in-progress` (awaiting independent QA and code review).
+
+- Changed: `utils/policy_evaluator.py` (hardcoded `RAILS`, `approved_amount`), `tests/test_policy_evaluator.py`. No fixtures, policy JSON, CSVs, or `main.py` changed.
+- Rails (code, not policy data; after policy validation, before the allow walk; review-only), in order: `request_id` non-blank → `invalid_request`; `customer_id` non-blank → `missing_customer_id`; amount parses, > 0, whole cents → `invalid_amount`; fraud cleans to no → `fraud_flag_raised` / `unknown_fraud_state`; both notes blank → `note_requires_review`; `already_paid_ids` an explicit collection of non-blank strings (else `invalid_request`) not containing the ID → `request_already_paid`.
+- `approved_amount`: Decimal quantized to 0.01 on `approve_full` (`"$49"` → `Decimal("49.00")`), `None` on review. Sub-cent amounts are not rounded; they fail `invalid_amount`.
+- Pending (read-only, `load_rows`): reason-only `never_arrived` / `wrong_item` policies approve none of RF-1070 (`fraud_flag_raised`), RF-1073 (`note_requires_review`), RF-1077 (`fraud_flag_raised`), RF-2181 (`note_requires_review`), RF-2182 (`unknown_fraud_state`).
+- `& .\.venv\Scripts\python.exe -m unittest discover -s tests` → `Ran 52 tests`, `OK`, exit 0. History loader→preview regression still returns the same 10 IDs.
+- Remaining (B3, runner task): batch-duplicate `request_id` handling exists only in `preview_matching_rows`; no persistent decision log yet, so re-running a batch is not idempotent across runs.

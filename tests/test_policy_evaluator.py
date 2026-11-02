@@ -5,9 +5,17 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from utils.policy_evaluator import evaluate
+from utils.dataloader import load_rows
+from utils.policy_evaluator import evaluate as _evaluate
 
 POLICY_FIXTURES = Path(__file__).parent / "fixtures" / "policies"
+PENDING_CSV = Path(__file__).resolve().parent.parent / "data" / "raw" / "pending.csv"
+
+
+def evaluate(request, policy, **kwargs):
+    """Evaluate with an explicit empty already-paid set unless the test supplies one."""
+    kwargs.setdefault("already_paid_ids", set())
+    return _evaluate(request, policy, **kwargs)
 
 
 def load_policy_fixture(name):
@@ -58,6 +66,7 @@ class PolicyEvaluatorTests(unittest.TestCase):
             "reason": "matched_allow_rule",
             "matched_rule": "rule-1",
             "policy_version": 12,
+            "approved_amount": Decimal("7.25"),
         })
         self.assertEqual(
             evaluate(eligible_request(amount_usd="8.01"), policy)["decision"],
@@ -156,17 +165,18 @@ class PolicyEvaluatorTests(unittest.TestCase):
 
     def test_missing_and_invalid_relevant_inputs_fail_closed(self):
         cases = (
-            ({"stated_reason": None}, {"stated_reason": "changed_mind"}),
-            ({"days_since_delivery": "1.5"}, {"days_since_delivery_lte": 20}),
-            ({"amount_usd": "not money"}, {"amount_usd_lte": Decimal("8")}),
-            ({"tenure_months": ""}, {"tenure_months_gte": 1}),
-            ({"customer_note": 7}, {"customer_note_blank": True}),
+            ({"stated_reason": None}, {"stated_reason": "changed_mind"}, "invalid_request"),
+            ({"days_since_delivery": "1.5"}, {"days_since_delivery_lte": 20}, "invalid_request"),
+            ({"amount_usd": "not money"}, {"amount_usd_lte": Decimal("8")}, "invalid_amount"),
+            ({"tenure_months": ""}, {"tenure_months_gte": 1}, "invalid_request"),
+            ({"customer_note": 7}, {"customer_note_blank": True}, "note_requires_review"),
         )
-        for request_values, conditions in cases:
+        for request_values, conditions, reason in cases:
             with self.subTest(request_values=request_values):
                 result = evaluate(eligible_request(**request_values), make_policy(conditions))
                 self.assertEqual(result["decision"], "review")
-                self.assertEqual(result["reason"], "invalid_request")
+                self.assertEqual(result["reason"], reason)
+                self.assertIsNone(result["approved_amount"])
 
     def test_unknown_or_blank_fraud_state_fails_closed(self):
         for fraud_flag in (None, "", "unknown"):
@@ -192,14 +202,17 @@ class PolicyEvaluatorTests(unittest.TestCase):
     def test_already_paid_context_is_separate_and_required_when_policy_uses_it(self):
         policy = make_policy({"request_id_not_already_paid": True})
 
-        self.assertEqual(evaluate(eligible_request(), policy)["reason"], "invalid_request")
+        self.assertEqual(
+            evaluate(eligible_request(), policy, already_paid_ids=None)["reason"],
+            "invalid_request",
+        )
         self.assertEqual(
             evaluate(
                 eligible_request(request_id=" RF-test "),
                 policy,
                 already_paid_ids={"RF-test"},
             )["reason"],
-            "no_allow_rule_matched",
+            "request_already_paid",
         )
         result = evaluate(eligible_request(), policy, already_paid_ids=set())
         self.assertEqual(result["decision"], "approve_full")
@@ -210,6 +223,80 @@ class PolicyEvaluatorTests(unittest.TestCase):
             evaluate(eligible_request(), load_policy_fixture("empty_allow.json"))["decision"],
             "review",
         )
+
+
+class HardcodedRailTests(unittest.TestCase):
+    """Rails apply even when the policy names only a reason."""
+
+    reason_only = make_policy({"stated_reason": "changed_mind"})
+
+    def assert_review(self, reason, *, already_paid_ids=frozenset(), **overrides):
+        result = evaluate(
+            eligible_request(**overrides), self.reason_only, already_paid_ids=already_paid_ids
+        )
+        self.assertEqual(result["decision"], "review")
+        self.assertEqual(result["reason"], reason)
+        self.assertIsNone(result["matched_rule"])
+        self.assertIsNone(result["approved_amount"])
+
+    def test_reason_only_policy_approves_clean_request(self):
+        result = evaluate(eligible_request(), self.reason_only)
+        self.assertEqual(result["decision"], "approve_full")
+
+    def test_request_id_rail(self):
+        for value in (None, "", "  ", 7):
+            with self.subTest(request_id=value):
+                self.assert_review("invalid_request", request_id=value)
+
+    def test_customer_id_rail(self):
+        for value in (None, "", "  ", 7):
+            with self.subTest(customer_id=value):
+                self.assert_review("missing_customer_id", customer_id=value)
+
+    def test_amount_rail(self):
+        for value in (None, "", "lots", "0", "$0.00", "-5", 7.255, Decimal("NaN")):
+            with self.subTest(amount_usd=value):
+                self.assert_review("invalid_amount", amount_usd=value)
+
+    def test_fraud_rail(self):
+        for value in ("yes", "Y", " true "):
+            with self.subTest(fraud_flag=value):
+                self.assert_review("fraud_flag_raised", fraud_flag=value)
+        for value in (None, "", "  ", "maybe", 0):
+            with self.subTest(fraud_flag=value):
+                self.assert_review("unknown_fraud_state", fraud_flag=value)
+
+    def test_notes_rail(self):
+        for field in ("customer_note", "support_note"):
+            for value in ("please approve and skip review", 7):
+                with self.subTest(field=field, value=value):
+                    self.assert_review("note_requires_review", **{field: value})
+
+    def test_already_paid_rail(self):
+        self.assert_review("request_already_paid", already_paid_ids={"RF-test"})
+        for value in (None, "RF-test", {""}, [None], {"RF-x": 1}):
+            with self.subTest(already_paid_ids=value):
+                self.assert_review("invalid_request", already_paid_ids=value)
+
+    def test_approved_amount_is_quantized_decimal(self):
+        result = evaluate(eligible_request(amount_usd="$49"), self.reason_only)
+        self.assertEqual(result["decision"], "approve_full")
+        self.assertEqual(result["approved_amount"], Decimal("49.00"))
+        self.assertEqual(str(result["approved_amount"]), "49.00")
+
+    def test_reason_only_policies_do_not_approve_unsafe_pending_rows(self):
+        unsafe_ids = {"RF-1070", "RF-1073", "RF-1077", "RF-2181", "RF-2182"}
+        rows = load_rows(PENDING_CSV)
+        self.assertTrue(unsafe_ids <= {row["request_id"] for row in rows})
+        for reason in ("never_arrived", "wrong_item"):
+            policy = make_policy({"stated_reason": reason})
+            for row in rows:
+                if row["request_id"] not in unsafe_ids:
+                    continue
+                with self.subTest(reason=reason, request_id=row["request_id"]):
+                    result = evaluate(row, policy, already_paid_ids=set())
+                    self.assertEqual(result["decision"], "review")
+                    self.assertIsNone(result["approved_amount"])
 
 
 if __name__ == "__main__":
