@@ -258,6 +258,16 @@ Assumptions: the example JSON defines the supported policy-schema baseline for t
 
 Failure modes to test or disclose: malformed/unsupported policy accidentally approving; missing or invalid request fields silently passing; any of the five post-decision fields leaking into eligibility; candidate's own historical decision contaminating replay; false duplicate blocking from treating historical approvals as confirmed payments; repeated request IDs producing duplicate simulated approvals; or simulation results being mistaken for live authorization. Unknowns and ambiguity route to review.
 
+## Independent QA revalidation — 2026-11-02
+
+**Decision: pass for the standalone evaluator slice only; task remains in-progress.** The current `main.py` is empty and contains no evaluator reference. `utils/policy_evaluator.py` performs no file I/O and does not read source CSVs or policy files; policy and request data are supplied by the caller. No application integration, CSV replay, policy activation, or payment path was validated or performed.
+
+The focused tests cover all supported operators: `stated_reason`, both delivery-day comparisons, both amount comparisons, tenure, fraud, customer ID presence, blank customer/support notes, and the separately supplied already-paid ID condition. Tests vary policy operands rather than asserting the proposed business thresholds as evaluator constants. Malformed policy, unsupported action/operator/value, and invalid request inputs route to review.
+
+Exact command from the repository root: `.\.venv\Scripts\python.exe -m unittest tests.test_policy_evaluator` — **11 tests passed, 0 failures** (2026-11-02).
+
+Earlier implementation and golden-replay claims in this task, including `main.py` runner behavior and history CSV results, are **previous-snapshot evidence, not current validation**: the corresponding runner is absent from the current `main.py`, and replay commands were not run in this QA pass. No application or test files were changed.
+
 ## What would move this line
 
 - The user accepts or replaces the tenure floor. Task 00 did not accept one.
@@ -271,3 +281,17 @@ Failure modes to test or disclose: malformed/unsupported policy accidentally app
 Counts are `history.csv` only: 251 rows, about Jun–Aug 2026. A past approval is not proof the next case is safe. This file does not authorize a refund.
 
 `wrong_size` stays off until someone explicitly chooses to add it: the same gates would be a wider set, and task 00 does not name that reason.
+
+## Bounded evaluator implementation - 2026-11-02
+
+Status: `in-progress`. This entry records only the authorized standalone evaluator slice; it does not mark the policy task complete or establish policy acceptance or production safety.
+
+Changed artifacts: `utils/policy_evaluator.py` implements `evaluate(request, policy, *, already_paid_ids=None)`; `tests/test_policy_evaluator.py` contains in-memory contract tests. Policy thresholds and conditions are read from the validated policy mapping; the proposed example's `$49` and 3-month values are not hardcoded. The evaluator is not wired into `main.py` or another application path. The already-paid ID set is separate context, and its absence routes a policy using that operator to review.
+
+Supported operators: `stated_reason`, `days_since_delivery_gte`, `days_since_delivery_lte`, `amount_usd_gt`, `amount_usd_lte`, `tenure_months_gte`, `fraud_flag`, `customer_id_present`, `customer_note_blank`, `support_note_blank`, and `request_id_not_already_paid`. `allow` rules are ordered OR; `all_of` entries and conditions within each `when` mapping are AND. Unsupported or malformed policy, unknown operators, malformed relevant inputs, unknown fraud state, and non-finite numeric policy amounts return review. Amounts compare as `Decimal`. Results contain `decision`, `reason`, `matched_rule`, and `policy_version`.
+
+Executed from the repository root on 2026-11-02: `.\.venv\Scripts\python.exe -m unittest tests.test_policy_evaluator` - 11 tests passed. Coverage includes each listed operator, custom policy values, OR/AND behavior, exact amount boundaries and currency parsing, malformed policies, missing/invalid inputs, unknown fraud, note handling, non-finite Decimal operands, and separate already-paid context.
+
+Not executed in this slice: history or pending replay, the full test suite, application/CSV runner, shadow review, or activation-readiness checks. No application file, source CSV, or policy JSON was changed. The proposed example policy remains unaccepted and inactive.
+
+Next dependency: independently review this evaluator contract, then obtain separate authorization for any application integration and request projection. Policy-owner acceptance, shadow review, and operational monitoring/rollback readiness remain required before any activation.

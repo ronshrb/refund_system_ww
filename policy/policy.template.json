@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "status": "draft",
+  "comment": "Template only. No auto-approval rules are configured; requests remain in review.",
+  "allow": []
+}

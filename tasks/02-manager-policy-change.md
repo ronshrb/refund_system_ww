@@ -1,14 +1,56 @@
-# 02 — Manager changes policy without an engineer
+# 02 — Manager policy preview utility
 
-Owner: project-engineer  
-Status: not-started  
-Dependencies: task 01 (the live allow-list is what she edits); decision engine must read policy as data  
-Business outcome: The Refund Operations Manager changes what the system does without asking an engineer, and sees what the change will do before it goes live.  
-Acceptance checks: not set yet. Not implemented. Do not activate policy from this file.
+Owner: project-engineer (implementation); project-product-manager (acceptance)
+Status: in-progress
+Dependencies: task 01; current policy schema/evaluator; request-row input shape
+Business outcome: Let a manager preview, deterministically and offline, which supplied request rows match a supplied policy JSON file before any policy is considered for use. This is a preview utility, not the complete manager mechanism.
+Acceptance checks:
+- [x] A valid policy file is parsed and evaluated by `utils/policy_evaluator.py`; values come from policy JSON, not constants copied from the example.
+- [x] Valid input returns a list of matching intake-only request rows, or an empty list when no rows match.
+- [x] Tests cover successful parsing, malformed JSON, invalid schema/unsupported operators, and fail-closed errors with no matches or approvals.
+- [x] Tests establish that `decision`, `decided_by`, `outcome_note`, `decided_at`, and `review_minutes` do not affect eligibility and are excluded from evaluator inputs and returned rows.
+- [x] The utility has no UI, LLM/provider calls, activation, live-file pointer, payment calls, source-data writes, or integration into `main.py`.
 
-## Deferred
+## Completed slice: policy template
 
-Open for later. This file is the design, not a go-ahead to build. Reviewer page is a later task.
+Added `policy/policy.template.json` with version 1, draft status, an explanatory comment, and no allow-rules. It has not been loaded into the evaluator or used to process requests. The remaining manager workflow is still pending.
+
+## Bounded engineer handoff: deterministic policy preview
+
+Implement one no-UI utility that accepts a policy JSON file path and request-row mappings. Parse the file with a JSON parser, validate it against the current closed schema in `utils/policy_evaluator.py`, and use `evaluate(request, policy)` as the sole eligibility decision. Do not copy thresholds from `policy/auto-approve.example.json`, duplicate matching rules, or add policy fields/operators beyond the evaluator's current schema.
+
+Before each evaluator call, project each row to intake-available fields only. Exclude `decision`, `decided_by`, `outcome_note`, `decided_at`, and `review_minutes`; these post-decision fields must not affect eligibility. Return a Python list of projected rows whose evaluator result is `approve_full`. A valid policy with no matches returns `[]`. Do not mutate request rows or source CSV files.
+
+Malformed JSON, unreadable policy input, or structurally invalid/unsupported policy must fail closed: raise a clear policy-input error before emitting results, with no partial match list and no approvals. Reuse the evaluator's schema validation path. If validation must be callable independently to handle an empty request set, expose/reuse a narrow validator rather than creating a second schema.
+
+### Required focused tests
+
+- Parse a valid policy file and return a list of projected matches; verify a valid no-match case returns an empty list.
+- Use a valid fixture with policy values different from the example and verify changing a value changes results, proving eligibility is data-driven.
+- Verify malformed JSON, unreadable input, invalid schema, and an unsupported operator fail clearly and produce no matches or approvals.
+- Add or vary all five excluded post-decision fields on otherwise identical rows and verify eligibility is unchanged. Verify they are absent from returned projections and that the source mappings are not mutated. Include `prior_refunds_12m` as an irrelevant field if present in the fixture.
+
+### Evidence and results
+
+- Implementation artifacts: `utils/policy_preview.py` adds `parse_policy_file` and `preview_matching_rows`; `utils/policy_evaluator.py` exposes `validate_policy` and continues to use it as the evaluator's schema gate; `tests/test_policy_preview.py` covers parser, preview, isolation, and duplicate handling.
+- Exact focused command from the repository root: `.\.venv\Scripts\python.exe -m unittest tests.test_policy_preview tests.test_policy_evaluator` — 18 tests passed.
+- Historical-row policy-match preview (not a payment or ground-truth correctness check). Exact command from the repository root:
+  ```powershell
+  .\.venv\Scripts\python.exe -c "import csv; from decimal import Decimal; from utils.policy_preview import preview_matching_rows; excluded = {'decision', 'decided_by', 'outcome_note', 'decided_at', 'review_minutes'}; f = open('data/raw/history.csv', newline='', encoding='utf-8'); rows = [{key: value for key, value in row.items() if key not in excluded} for row in csv.DictReader(f)]; f.close(); matches = preview_matching_rows(rows, 'policy/auto-approve.example.json', already_paid_ids=set()); print('Policy-match preview on historical rows (not a payment or ground-truth correctness check)'); print('Matches:', [{'request_id': row.get('request_id'), 'amount_usd': row.get('amount_usd')} for row in matches]); print('Count:', len(matches)); print('Total amount_usd:', sum((Decimal(row['amount_usd']) for row in matches), Decimal('0')))"
+  ```
+  Observed result: RF-2005 ($42), RF-1009 ($14), RF-2032 ($49), RF-1015 ($27), RF-1026 ($12), RF-2072 ($17.72), RF-1046 ($26), RF-2119 ($48), RF-1055 ($23), RF-2171 ($11.86); count 10; total amount_usd $270.58. No post-decision fields were supplied and no paid IDs were inferred from history.
+- Executed checks: valid policy parsing preserved a numeric amount operand as `Decimal`; a matching row was returned as a list; a valid nonmatching policy returned `[]`; changing a custom amount limit from 7.00 to 8.00 changed the result; unreadable, malformed, invalid-schema, and unsupported-operator policy inputs raised `PolicyInputError`; an invalid policy was rejected before request-row iteration; all five post-decision fields did not affect eligibility and were absent from results; source row mappings were unchanged; already-paid IDs and all occurrences of repeated candidate IDs were excluded.
+- Remaining limitations: no UI or complete manager workflow; no activation, live pointer, payments, source-data writes, or integration; policy correctness and future-case safety are not established. The task remains `in-progress` for the full manager mechanism and independent review.
+
+### Explicit boundaries
+
+This is a deterministic preview utility, **not** the complete manager mechanism. No UI, LLM/provider calls, policy editing/versioning, live/draft comparison, activation, rollback, live-file pointer, reviewer queue, payment calls, source-data writes, or integration into `main.py`. It previews supplied rows against supplied policy data; it does not authorize refunds or establish that future cases are safe. Keep this task `in-progress` until the acceptance checks pass and evidence is recorded here.
+
+## Superseded full-manager design (reference only; not implementation scope)
+
+The material below is retained as historical design context only. Its UI, LLM drafting, versioning, live-pointer, activation, rollback, and broader replay requirements are not part of this bounded task and are not authorized by this handoff.
+
+The full manager workflow and reviewer page remain deferred and are not part of this bounded utility.
 
 A settings page with “amount cap = 300” and “stolen-card = off” is the right **editor**, and still the wrong **product**. She can change numbers an engineer already thought of. She cannot change what the system *is*, and she still would not know the blast radius before it pays anyone.
 
