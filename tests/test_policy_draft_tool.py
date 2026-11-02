@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from utils import policy_draft_tool as draft_tool
+from utils.policy import policy_draft_tool as draft_tool
 
 
 def valid_policy(*, rule_id="custom_rule", amount_limit=Decimal("20.00")):

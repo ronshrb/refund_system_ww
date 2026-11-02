@@ -2,11 +2,11 @@
 
 Run from the repository root:
 
-    streamlit run main.py
+    streamlit run app/main.py
 
 Or with the project venv:
 
-    .\\.venv\\Scripts\\python.exe -m streamlit run main.py
+    .\\.venv\\Scripts\\python.exe -m streamlit run app/main.py
 
 This entry wires navigation only. It does not evaluate refunds, call
 ``build_policy``, activate policy, or contact a model provider.

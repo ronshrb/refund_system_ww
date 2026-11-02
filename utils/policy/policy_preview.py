@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
-from utils.policy_evaluator import evaluate, validate_policy
+from utils.policy.policy_evaluator import evaluate, validate_policy
 
 
 _POST_DECISION_FIELDS = {

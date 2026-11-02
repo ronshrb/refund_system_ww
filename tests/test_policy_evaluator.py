@@ -5,8 +5,8 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from utils.dataloader import load_rows
-from utils.policy_evaluator import evaluate as _evaluate
+from utils.data.dataloader import load_rows
+from utils.policy.policy_evaluator import evaluate as _evaluate
 
 POLICY_FIXTURES = Path(__file__).parent / "fixtures" / "policies"
 PENDING_CSV = Path(__file__).resolve().parent.parent / "data" / "raw" / "pending.csv"

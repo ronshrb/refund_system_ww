@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
 
-from utils.data_processing import REASONS, normalize_reason, parse_amount
+from utils.data.data_processing import REASONS, normalize_reason, parse_amount
 
 
 _POLICY_KEYS = {"version", "status", "comment", "allow"}

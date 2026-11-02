@@ -5,13 +5,13 @@ import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from utils.data_processing import parse_amount
-from utils.dataloader import load_rows
-from utils.policy_evaluator import validate_policy
-from utils.policy_preview import preview_matching_rows
+from utils.data.data_processing import parse_amount
+from utils.data.dataloader import load_rows
+from utils.policy.policy_evaluator import validate_policy
+from utils.policy.policy_preview import preview_matching_rows
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PENDING_PATH = PROJECT_ROOT / "data" / "raw" / "pending.csv"
 _CENT = Decimal("0.01")
 

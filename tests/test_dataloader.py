@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from utils.dataloader import load_rows, load_table
-from utils.policy_preview import preview_matching_rows
+from utils.data.dataloader import load_rows, load_table
+from utils.policy.policy_preview import preview_matching_rows
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
