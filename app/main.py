@@ -14,6 +14,14 @@ This entry wires navigation only. It does not evaluate refunds, call
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Repo root on path so pages can import ``utils`` when Streamlit runs this entry.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import streamlit as st
 
 st.set_page_config(

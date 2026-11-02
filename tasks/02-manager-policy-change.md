@@ -49,15 +49,15 @@ Completed preview-utility acceptance checks:
 - [x] Tests establish that `decision`, `decided_by`, `outcome_note`, `decided_at`, and `review_minutes` do not affect eligibility and are excluded from evaluator inputs and returned rows.
 - [x] The utility has no UI, LLM/provider calls, activation, live-file pointer, payment calls, source-data writes, or integration into `main.py`.
 
-Acceptance checks for the approved next slice (all pending):
-- [ ] The manager can describe a policy change across conversation turns, with the current draft retained in the Streamlit session.
-- [ ] Before any tool call, the agent asks targeted questions about vague concepts such as “good customers” or “small stuff” and guides the manager toward supported schema values such as amount ranges. It does not invent an unconfirmed threshold.
-- [ ] Only after required answers are clear does the agent call the Python function tool named `build_policy`, registered and invoked by Streamlit as the model tool. The tool receives a complete structured candidate, validates it, previews prior and candidate drafts on the same local pending cohort, and returns the updated draft with aggregate preview results.
-- [ ] Invalid candidates or failed previews are not presented as proposed drafts and do not replace the current session draft. The result contains aggregate counts/amounts and deltas only; request rows, IDs, customer fields, and notes remain local.
-- [ ] No CLI `main` or candidate-envelope file is part of this workflow. Conversation state and function arguments/results are handled in memory by the Streamlit flow.
-- [ ] No model provider call occurs unless a provider/runtime is configured and data-sharing is approved. Never send customer request rows or customer/support note text to a model provider. Keep an offline/mock path for tests and unconfigured use.
-- [ ] The agent/tool cannot approve or reject requests, call payments, write a live policy/pointer, or activate/version policy. Activation and versioning remain a future, separate explicit manager action.
-- [ ] Focused offline tests cover clarification-before-tool-call, multi-turn draft use, Streamlit function-tool registration/invocation, validation and preview ordering, identical preview cohorts, aggregate-only results, failure-state preservation, provider-call gating, and the absence of approval/activation capabilities. Tests for this approved flow have not been run.
+Acceptance checks for the approved conversational Streamlit manager slice:
+- [x] The manager can describe a policy change across conversation turns, with the current draft retained in the Streamlit session.
+- [x] Before any tool call, the agent asks targeted questions about vague concepts such as “good customers” or “small stuff” and guides the manager toward supported schema values such as amount ranges. It does not invent an unconfirmed threshold. *(Covered as system-instruction / prompt guidance; focused tests assert guidance is present. Live model clarification behavior is not runtime-tested against OpenAI.)*
+- [x] Only after required answers are clear does the agent call the Python function tool named `build_policy`, registered and invoked by the Streamlit host as the model tool. The tool receives a complete structured candidate, validates it, previews prior and candidate drafts on the same local pending cohort, and returns the updated draft with aggregate preview results. *(Host injects session `current_draft`; OpenAI path mocked in tests.)*
+- [x] Invalid candidates or failed previews are not presented as proposed drafts and do not replace the current session draft. The result contains aggregate counts/amounts and deltas only; request rows, IDs, customer fields, and notes remain local.
+- [x] No CLI `main` or candidate-envelope file is part of this workflow. Conversation state and function arguments/results are handled in memory by the Streamlit flow.
+- [x] No model provider call occurs unless a provider/runtime is configured and data-sharing is approved. Never send customer request rows or customer/support note text to a model provider. Keep an offline/mock path for tests and unconfigured use. *(UI checkbox gates source policy-notes / data-dictionary text; missing key returns an honest offline message.)*
+- [x] The agent/tool cannot approve or reject requests, call payments, write a live policy/pointer, or activate/version policy. Activation and versioning remain a future, separate explicit manager action. **Activation/versioning UI is not implemented and remains unchecked as product scope.**
+- [x] Focused offline tests cover clarification-before-tool guidance, session draft update only on `proposed`, `build_policy` tool registration shape, provider-payload exclusions, missing-key path, and invalid/`cannot_express` draft preservation (see evidence below). Adapter cohort/aggregate checks remain in `tests.test_policy_draft_tool`.
 
 ## Completed slice: policy template
 
@@ -123,6 +123,157 @@ Executed from the repository root with the checked-in virtual environment on 202
 
 The deterministic preview utility is complete. The approved next slice is the Streamlit manager conversation and `build_policy` function tool. There is no activation/versioning UI, rollback, live-file pointer, reviewer queue, payment call, source-data write, or integration into `main.py` in this scope. A draft preview is not authorization to refund or evidence that future cases are safe. Keep this task `in-progress` until the new acceptance checks pass and evidence is recorded here.
 
+## Completed slice: conversational Streamlit manager + `build_policy` tool — 2026-11-02
+
+Owner: project-engineer  
+Status: **done for this conversational draft/preview slice only** (activation/versioning UI and Reviews queue remain out of scope; task overall stays `in-progress`)
+
+Scope: Streamlit Policy Management conversational agent using the OpenAI tools API with the registered local Python tool `build_policy`. Session state owns messages + current draft (initialized from `policy/policy.template.json`). Explicit UI permission gate before source policy-notes / data-dictionary text are sent to the provider. Honest offline path when `OPENAI_API_KEY` is missing. No activation/versioning UI, no CSV rewrites, no refund approvals, no live policy writes.
+
+### Changed / created artifacts
+
+- `utils/policy/policy_agent.py` — env load via python-dotenv (repo-root `.env`, values never logged), system instructions, `build_policy` OpenAI tool schema, session helpers, provider turn loop, draft update only on `status == "proposed"`, aggregate preview formatting, offline message.
+- `app/pages/policy_management.py` — chat UI (user + assistant), permission checkbox, draft expander, preview summary display, wires session state to `run_policy_agent_turn`.
+- `app/main.py` — repo-root `sys.path` bootstrap + `load_environment()` on startup.
+- `tests/test_policy_agent.py` — focused offline/mocked OpenAI tests (never calls real OpenAI).
+- `requirements.txt` — adds `openai`, `python-dotenv`.
+
+### Exact commands and results
+
+Install into project venv:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install openai python-dotenv
+```
+
+Focused tests from repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_policy_agent tests.test_policy_draft_tool -v
+```
+
+Observed: **16 tests passed** (`Ran 16 tests in 0.012s`, `OK`).
+
+Compile check:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile app\main.py app\pages\policy_management.py utils\policy\policy_agent.py
+```
+
+Observed: OK.
+
+Run UI (venv):
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app\main.py
+```
+
+Clarification-before-tool: tested as **system-instruction guidance** (`clarification_guidance_present` + system message content). The host always registers `build_policy`; the model is instructed not to call it while ambiguous. Live OpenAI clarification quality is not claimed.
+
+`.env` / secrets: load via `load_dotenv(PROJECT_ROOT / ".env")` only. Key presence checked as boolean. **`.env` contents and `OPENAI_API_KEY` values were never read into chat, printed, logged, or committed in this slice.** `.gitignore` already includes `.env`.
+
+### Remaining limitations
+
+- No activation, versioning, rollback, or live-policy pointer UI.
+- Reviews page remains a stub.
+- Clarification quality depends on the live model; only prompt/guidance is automated.
+- With permission, source policy-notes and data-dictionary *text* may be sent to OpenAI; history/pending rows and customer/support note *values from request rows* are never sent.
+- Task overall remains `in-progress` until independent QA and activation (separate brief) if authorized.
+
+### Independent QA: conversational Streamlit + `build_policy` agent slice — 2026-11-02
+
+Owner: Project QA  
+Status: **pass for this conversational drafting slice** (activation/versioning still out of scope; task overall stays `in-progress`)  
+Scope: static review of host/page/tool/payload/permission/draft-update rules; focused offline unittest + smoke-import. No product-code changes. No real OpenAI calls. `.env` / API key values were never read, printed, or committed by QA.
+
+#### Exact commands and results
+
+From repository root (project venv):
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_policy_agent tests.test_policy_draft_tool -v
+```
+
+Observed: **16 tests passed** (`Ran 16 tests in 0.012s`, `OK`). OpenAI clients in agent tests are `MagicMock` / patched; draft-tool tests mock `load_rows` / `preview_matching_rows` where appropriate. No live provider spend.
+
+Smoke (compile/import/requirements; no Streamlit server; no provider call):
+
+```powershell
+.\.venv\Scripts\python.exe -c "<import utils.policy.policy_agent + policy_draft_tool; py_compile app/pages/policy_management.py; assert openai+python-dotenv+streamlit in requirements.txt; import openai, dotenv; assert tests never reference .env/OPENAI_API_KEY; assert .gitignore has .env>"
+```
+
+Observed: imports OK; page compiles; packages present (`openai` 3.42.1); `.env` gitignored; tests contain no `.env` / `OPENAI_API_KEY` refs.
+
+#### Acceptance mapping (conversational slice)
+
+| Check | Result | How verified |
+|---|---|---|
+| 1. Session owns conversation + draft (template init) | **Pass** | `ensure_session_defaults` + page keys; `test_ensure_session_defaults_initializes_template_draft` |
+| 2. Clarification-before-tool; no inventing thresholds | **Pass (prompt-level)** | `SYSTEM_INSTRUCTIONS` + `clarification_guidance_present`; live model clarification **not** runtime-tested |
+| 3. Only `build_policy`; draft update only on `proposed` | **Pass** | Tool schema/registration tests; `apply_build_policy_result`; mocked turn updates; host injects `current_draft` |
+| 4. Aggregate preview; no row-level relay to model | **Pass** | `format_preview_summary_for_manager`; `_tool_result_for_model`; draft-tool aggregate-only test |
+| 5. Permission gate for notes/dictionary | **Pass** | Checkbox → `include_source_context`; withheld vs included system message tests |
+| 6. Never send history/pending rows / request notes to provider | **Pass (architecture + tests)** | Agent never loads history/pending into payloads; forbidden-marker tests; schema operator names only |
+| 7. Missing key → honest offline message | **Pass** | `OFFLINE_MESSAGE`; `test_missing_key_path_is_honest_offline` |
+| 8. No activation / refund approval / payments / live write | **Pass** | Page/host/tool have no activation UI or money tools; caption states non-activation |
+| 9. Offline tests mock OpenAI; no real API spend | **Pass** | Mocked client; key path patched; this QA run made no provider calls |
+
+#### Findings
+
+- **None material** for this slice.
+- **Low / observation** (`utils/policy/policy_agent.py`): live `assert_messages_safe_for_provider(messages)` is called without `forbidden_substrings`, so the scanner is a no-op unless markers are supplied. Real control is architectural exclusion (no request-row load into provider messages). Not a failed acceptance check.
+
+#### Coverage gaps (do not block this slice)
+
+- Live OpenAI clarification quality / refusal to invent thresholds not exercised against a real model.
+- No Streamlit UI automation for checkbox → payload wiring (static + unit coverage only).
+- Unsupported non-`build_policy` tool-call rejection path exists in host but is not unit-tested.
+- Activation/versioning intentionally untested (out of scope).
+
+#### Recommendation
+
+- **Pass** for the conversational drafting slice. Conversational acceptance checkboxes **may stay checked**, with clarification explicitly understood as prompt/system guidance only.
+- Next handoff: **project-code-reviewer** (no engineer repair required for this QA pass).
+- Task overall remains `in-progress` until activation/versioning (separate brief) and Reviews queue are addressed.
+
+### Independent code-review: conversational Policy Management agent slice — 2026-11-02
+
+Owner: project-code-reviewer  
+Status: **approve-with-nits for this conversational drafting slice only** (activation/versioning and Reviews queue remain out of scope; task overall stays `in-progress`)  
+Scope: read-only review of `utils/policy/policy_agent.py`, `app/pages/policy_management.py`, `tests/test_policy_agent.py`, `requirements.txt` (`openai`, `python-dotenv`), and `app/main.py` wiring. Did not expand into activation, reviewer queue, or unrelated modules beyond confirming the agent cannot reach them. No application-code edits.
+
+#### Hard-limit checks
+
+| Limit | Result |
+|---|---|
+| LLM cannot approve refunds / activate / write live policy / payments | **Pass** — only `build_policy` registered; page has no activation/payment path |
+| No history/pending rows, request IDs, customer fields, note *values* to OpenAI | **Pass** — architectural exclusion; host never loads those CSVs into provider messages |
+| Source notes/dictionary only with permission gate | **Pass** — checkbox → `include_source_context` |
+| Missing key → honest offline, not fake model | **Pass** — `OFFLINE_MESSAGE`; no invented reply / no tool call |
+| Session draft updates only on `build_policy` `status == "proposed"` | **Pass** — `apply_build_policy_result` + turn loop |
+| Never read/print `.env` secrets in code/tests/comments | **Pass** — dotenv load + boolean presence only; tests avoid key/`.env` value refs |
+
+#### Executed checks (reviewer)
+
+- Static review of the scoped files and callers that control behavior.
+- Focused unittest (read-only): `.\.venv\Scripts\python.exe -m unittest tests.test_policy_agent -v` → **10 tests passed** (`OK`).
+- Light offline import: notes/dictionary load; tools = `("build_policy",)`; withheld system text when permission false. Did not print or read `.env` values. Did not call live OpenAI.
+
+#### Findings
+
+1. **Low / nit** (`utils/policy/policy_agent.py` ~403): live `assert_messages_safe_for_provider(messages)` runs with empty `forbidden_substrings` (scanner no-op). Real control is architectural exclusion. Optional later: supply markers in tests/docs only, or drop the dead production call so it does not imply runtime scanning. Concurs with QA.
+2. **Low / coverage** (prompt contract): clarification-before-tool and “do not invent thresholds” are system-instruction only; not runtime-enforced against a live model. Acceptable for this demo slice if documented (QA already labeled prompt-level).
+3. **Low / coverage**: unsupported non-`build_policy` tool-call rejection exists in the host but is untested (QA noted). Optional QA follow-up, not a repair blocker.
+
+No material correctness or assignment-boundary blockers for this slice.
+
+#### Recommendation
+
+- **Approve-with-nits** for the conversational Policy Management agent slice.
+- **Engineer repair not required** before treating this slice as QA+review gated.
+- Do **not** treat the full Part 2 manager mechanism as done: activation/versioning/rollback/live pointer remain unimplemented; Reviews queue remains a stub.
+- Task overall remains `in-progress`.
+
 ## Approved engineer handoff: conversational Streamlit manager flow
 
 1. Keep the manager's current draft and conversation in Streamlit session state. The manager describes a change over one or more turns.
@@ -131,7 +282,7 @@ The deterministic preview utility is complete. The approved next slice is the St
 4. Keep preview rows and customer data inside local code. Do not send customer request rows, IDs, customer fields, or customer/support note text to a model provider. Do not make a provider call unless a provider/runtime is configured and data-sharing is approved; retain an offline/mock path.
 5. Do not add a CLI `main` or candidate-envelope file. Prompt/agent files, if present, are behavior guidance only and do not configure a provider or runtime. The tool has no approval, rejection, payment, live-policy write, activation, or versioning capability. Activation/versioning require a future separate explicit manager action.
 
-**Implementation state:** `utils/policy_draft_tool.py` now exposes the stateless `build_policy` validation/preview function and the manager agent/prompts describe the clarification-first function-tool contract. The Streamlit host, session-state update logic, actual model-tool registration/invocation, and corresponding focused automated tests have not been implemented or verified. The existing `tests/test_policy_draft_tool.py` still targets the superseded CLI interface; its historical results do not satisfy the new acceptance checks.
+**Implementation state (updated):** Streamlit host, session draft ownership, OpenAI tools registration/invocation for `build_policy`, permission gate, offline path, and focused offline tests are implemented as of the 2026-11-02 conversational slice above. Activation/versioning remains not implemented. Independent QA revalidation is the suggested next handoff.
 
 ### Stateless function-tool adapter refactor — 2026-11-02
 
