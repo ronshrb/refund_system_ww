@@ -104,6 +104,8 @@ All 251 amount strings matched the bounded grammar and parsed as decimals. Eight
 
 Limitations: day-first is a documented demo assumption, not an externally confirmed source contract. The sample does not exercise malformed dates, invalid amounts, currency grouping, negative values, excessive precision, or non-UTC timestamps; those remain required parser test cases, not observed outcomes. The updated unit tests have not yet been executed in this environment.
 
+Review H1 fix (2026-11-02): `utils/dataloader.py` now reads CSVs by path as text (`dtype=str, keep_default_na=False`) and adds `load_rows`. A new regression test, `load_rows(history.csv)` → preview under `policy/auto-approve.example.json`, returns exactly the 10 expected IDs. `& .\.venv\Scripts\python.exe -m unittest discover -s tests` → `Ran 32 tests ... OK`.
+
 ### Every column
 
 History is 251 rows (about Jun–Aug 2026). Pending is 21, all `decision=pending`. Dictionary: the files do not always match these definitions. Longer notes above stay; this is the rest worth knowing.
