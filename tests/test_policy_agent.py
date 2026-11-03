@@ -28,6 +28,17 @@ def _template_draft():
     return policy_agent.load_template_draft()
 
 
+_PROTECTED_POLICY_FILES = (
+    Path(__file__).resolve().parents[1] / "data" / "raw" / "policy_notes.csv",
+    Path(__file__).resolve().parents[1] / "policies" / "live_pointer.json",
+)
+
+
+def _protected_bytes():
+    """Snapshot files this slice must not rewrite."""
+    return {path: path.read_bytes() for path in _PROTECTED_POLICY_FILES}
+
+
 def _proposed_result(draft):
     return {
         "status": "proposed",
@@ -565,6 +576,132 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertIn('Only after build_policy returns "proposed"', instructions)
         self.assertIn("Do not ask for a name", instructions)
         self.assertNotIn("[[ready_to_build]]", instructions)
+
+    def test_instructions_describe_review_notes_as_guidance(self):
+        instructions = policy_agent.SYSTEM_INSTRUCTIONS
+        self.assertIn("review_notes", instructions)
+        self.assertIn("general", instructions)
+        self.assertIn("not an auto-approve rule", instructions)
+        self.assertIn("does not have to say", instructions)
+        self.assertIn("Split compound notes", instructions)
+        self.assertIn("cosmetic damage", instructions)
+        self.assertIn("late delivery", instructions)
+        self.assertIn("could be an automatic refund or a note", instructions)
+        self.assertNotIn("When the manager asks to add a note for reviewers", instructions)
+        self.assertNotIn("Do not invent an unconfirmed threshold", instructions)
+        self.assertNotIn("[[ready_to_build]]", instructions)
+        self.assertNotIn("picking error -> wrong_item", instructions)
+
+        schemas = {
+            item["function"]["name"]: item
+            for item in policy_agent.registered_tool_schemas()
+        }
+        candidate = schemas["build_policy"]["function"]["parameters"]["properties"][
+            "candidate_policy"
+        ]
+        self.assertNotIn("review_notes", candidate["required"])
+        notes = candidate["properties"]["review_notes"]
+        self.assertEqual(notes["type"], "array")
+        self.assertIn("not an allow rule", notes["description"])
+        self.assertIn("Does not change auto-approve", notes["description"])
+        item = notes["items"]
+        self.assertEqual(item["required"], ["reason", "text"])
+        self.assertEqual(item["properties"]["text"]["type"], "string")
+        self.assertEqual(
+            set(item["properties"]["reason"]["enum"]),
+            {
+                "wrong_size",
+                "changed_mind",
+                "arrived_damaged",
+                "wrong_item",
+                "never_arrived",
+                "late_delivery",
+                "general",
+            },
+        )
+
+    def test_review_note_on_template_draft_is_proposed_and_keeps_allow(self):
+        protected = _protected_bytes()
+        current = _template_draft()
+        before = deepcopy(current)
+        note = (
+            "Never arrived: if the carrier has a signature or delivery photo, "
+            "we reject unless the carrier opens an investigation."
+        )
+        candidate = deepcopy(current)
+        candidate["review_notes"] = [{"reason": "never_arrived", "text": note}]
+
+        result = policy_agent.execute_build_policy_arguments(
+            {"candidate_policy": candidate},
+            current,
+        )
+        self.assertEqual(result["status"], "proposed")
+        self.assertEqual(result["draft"]["allow"], before["allow"])
+        self.assertEqual(
+            result["draft"]["review_notes"],
+            [{"reason": "never_arrived", "text": note}],
+        )
+        updated, changed = policy_agent.apply_build_policy_result(current, result)
+        self.assertTrue(changed)
+        self.assertEqual(updated["allow"], before["allow"])
+        self.assertEqual(updated["review_notes"], result["draft"]["review_notes"])
+        self.assertEqual(current, before)
+
+        edited = deepcopy(updated)
+        edited["review_notes"][0]["text"] = note + " Check the photo."
+        edited_result = policy_agent.execute_build_policy_arguments(
+            {"candidate_policy": edited},
+            updated,
+        )
+        self.assertEqual(edited_result["status"], "proposed")
+        self.assertEqual(edited_result["draft"]["allow"], before["allow"])
+        self.assertEqual(edited_result["draft"]["review_notes"][0]["text"], note + " Check the photo.")
+
+        removed = deepcopy(edited_result["draft"])
+        removed["review_notes"] = []
+        removed_result = policy_agent.execute_build_policy_arguments(
+            {"candidate_policy": removed},
+            edited_result["draft"],
+        )
+        self.assertEqual(removed_result["status"], "proposed")
+        self.assertEqual(removed_result["draft"]["allow"], before["allow"])
+        self.assertEqual(removed_result["draft"]["review_notes"], [])
+
+        general = deepcopy(before)
+        general_text = "Partials for cosmetic damage or late delivery stay with a person."
+        general["review_notes"] = [{"reason": "general", "text": general_text}]
+        general_result = policy_agent.execute_build_policy_arguments(
+            {"candidate_policy": general},
+            before,
+        )
+        self.assertEqual(general_result["status"], "proposed")
+        self.assertEqual(general_result["draft"]["allow"], before["allow"])
+        self.assertEqual(
+            general_result["draft"]["review_notes"],
+            [{"reason": "general", "text": general_text}],
+        )
+        self.assertEqual(_protected_bytes(), protected)
+
+    def test_bad_review_note_reason_does_not_replace_draft(self):
+        protected = _protected_bytes()
+        current = _template_draft()
+        before = deepcopy(current)
+        candidate = deepcopy(current)
+        candidate["review_notes"] = [
+            {"reason": "lost_package", "text": "Look at the carrier."}
+        ]
+        result = policy_agent.execute_build_policy_arguments(
+            {"candidate_policy": candidate},
+            current,
+        )
+        self.assertEqual(result["status"], "invalid")
+        self.assertIn("review_notes[0].reason", result["errors"][0])
+        next_draft, changed = policy_agent.apply_build_policy_result(current, result)
+        self.assertFalse(changed)
+        self.assertEqual(next_draft, before)
+        self.assertEqual(current, before)
+        self.assertNotIn("review_notes", next_draft)
+        self.assertEqual(_protected_bytes(), protected)
 
     def test_instructions_offer_shared_clarification_presets(self):
         from utils.policy.policy_agent_utils import CLARIFY_PRESET_VALUES

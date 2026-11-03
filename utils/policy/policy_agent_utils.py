@@ -101,6 +101,23 @@ def _candidate_policy_schema() -> dict[str, Any]:
             "status": {"type": "string", "enum": ["draft"]},
             "comment": {"type": "string"},
             "allow": {"type": "array", "items": rule},
+            "review_notes": {
+                "type": "array",
+                "description": (
+                    "Reviewer guidance, not an allow rule. Does not change auto-approve."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "enum": sorted((*REASONS, "general")),
+                        },
+                        "text": {"type": "string"},
+                    },
+                    "required": ["reason", "text"],
+                },
+            },
         },
         "required": ["version", "status", "allow"],
     }

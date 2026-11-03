@@ -1,0 +1,21 @@
+{
+  "version": "test-tenure-floor-customer-unpaid",
+  "status": "test",
+  "comment": "Synthetic test fixture only; not approved policy. The 12-month floor is a test value, not a recommendation.",
+  "allow": [
+    {
+      "id": "synthetic-tenure-floor-customer-unpaid",
+      "action": "approve_full",
+      "all_of": [
+        {
+          "comment": "Synthetic fixture, not approved policy.",
+          "when": {
+            "tenure_months_gte": 12,
+            "customer_id_present": true,
+            "request_id_not_already_paid": true
+          }
+        }
+      ]
+    }
+  ]
+}

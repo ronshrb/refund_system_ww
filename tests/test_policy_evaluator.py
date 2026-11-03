@@ -72,6 +72,66 @@ class PolicySchemaErrorTests(unittest.TestCase):
         duplicate["allow"].append(dict(duplicate["allow"][0]))
         self.assertIn("duplicated", policy_schema_errors(duplicate)[0])
 
+    def test_review_notes_are_optional_guidance_with_named_errors(self):
+        note = (
+            "Never arrived: if the carrier has a signature or delivery photo, "
+            "we reject unless the carrier opens an investigation."
+        )
+        policy = make_policy({"stated_reason": "changed_mind"})
+        self.assertEqual(policy_schema_errors(policy), [])
+
+        policy["review_notes"] = []
+        self.assertEqual(policy_schema_errors(policy), [])
+
+        policy["review_notes"] = [
+            {"reason": "never_arrived", "text": note},
+            {"reason": "never_arrived", "text": "A second note for the same reason."},
+            {"reason": "general", "text": "Partials for cosmetic damage or late delivery stay with a person."},
+        ]
+        self.assertEqual(policy_schema_errors(policy), [])
+
+        policy["review_notes"] = [{"reason": "lost_package", "text": note}]
+        self.assertIn("review_notes[0].reason", policy_schema_errors(policy)[0])
+
+        policy["review_notes"] = [{"reason": "never_arrived", "text": note, "amount": 10}]
+        extra_error = policy_schema_errors(policy)[0]
+        self.assertIn("review_notes[0]", extra_error)
+        self.assertNotIn("review_notes[0].reason", extra_error)
+
+        policy["review_notes"] = [{"reason": "general", "text": ""}]
+        self.assertIn("review_notes[0].text", policy_schema_errors(policy)[0])
+
+        policy["review_notes"] = {"reason": "general", "text": note}
+        not_list = policy_schema_errors(policy)[0]
+        self.assertIn("review_notes", not_list)
+        self.assertIn("must be a list", not_list)
+
+        policy["review_notes"] = [{"reason": "general", "text": note}]
+        policy["reject"] = []
+        unknown = policy_schema_errors(policy)[0]
+        self.assertIn("Unknown top-level keys ['reject']", unknown)
+
+    def test_review_notes_do_not_change_evaluate(self):
+        policy = make_policy({"stated_reason": "changed_mind"})
+        with_notes = make_policy({"stated_reason": "changed_mind"})
+        with_notes["review_notes"] = [
+            {
+                "reason": "never_arrived",
+                "text": (
+                    "Never arrived: if the carrier has a signature or delivery photo, "
+                    "we reject unless the carrier opens an investigation."
+                ),
+            }
+        ]
+        matching = eligible_request()
+        non_matching = eligible_request(stated_reason="never arrived")
+        compared = ("decision", "reason", "matched_rule", "approved_amount")
+        for request in (matching, non_matching):
+            without = evaluate(request, policy)
+            with_result = evaluate(request, with_notes)
+            for field in compared:
+                self.assertEqual(with_result[field], without[field])
+
 
 class PolicyEvaluatorTests(unittest.TestCase):
     def test_policy_values_are_data_driven_and_result_identifies_rule_and_version(self):

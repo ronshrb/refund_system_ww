@@ -8,7 +8,10 @@ from numbers import Integral
 from utils.data.data_processing import REASONS, normalize_reason, parse_amount
 
 
-_POLICY_KEYS = {"version", "status", "comment", "allow"}
+# review_notes is reviewer guidance stored on the policy. It is not an allow rule.
+_POLICY_KEYS = {"version", "status", "comment", "allow", "review_notes"}
+_REVIEW_NOTE_KEYS = {"reason", "text"}
+_REVIEW_REASONS = REASONS | {"general"}
 _RULE_KEYS = {"id", "action", "all_of"}
 _GROUP_KEYS = {"source_note", "comment", "when"}
 _OPERATORS = {
@@ -97,6 +100,11 @@ def policy_schema_errors(policy):
     rules = policy["allow"]
     if not isinstance(rules, list):
         return ["'allow' must be a list of rules."]
+    if "review_notes" in policy:
+        # Absent is valid. Present must be a list of {reason, text} notes.
+        note_error = _review_note_error(policy["review_notes"])
+        if note_error:
+            return [note_error]
 
     seen_rule_ids = set()
     for index, rule in enumerate(rules):
@@ -135,6 +143,31 @@ def policy_schema_errors(policy):
                 if not _valid_operand(operator, operand):
                     return [f"{group_where}.when.{operator} has invalid value {operand!r}. {_operand_hint(operator)}"]
     return []
+
+
+def _review_note_error(notes):
+    """Return the first ``review_notes`` schema error, or None when the list is valid.
+
+    A note tells a reviewer what to look at. It is not an allow rule, a reject,
+    or a partial, and ``evaluate`` does not read it.
+    """
+    if not isinstance(notes, list):
+        return "'review_notes' must be a list."
+    for index, note in enumerate(notes):
+        where = f"review_notes[{index}]"
+        if not isinstance(note, Mapping) or set(note) != _REVIEW_NOTE_KEYS:
+            keys = sorted(note) if isinstance(note, Mapping) else type(note).__name__
+            return f"{where} must have exactly keys {sorted(_REVIEW_NOTE_KEYS)}; got {keys}."
+        reason = note["reason"]
+        if not isinstance(reason, str) or reason not in _REVIEW_REASONS:
+            return (
+                f"{where}.reason must be one of {sorted(_REVIEW_REASONS)}; "
+                f"got {reason!r}."
+            )
+        text = note["text"]
+        if not isinstance(text, str) or not text.strip():
+            return f"{where}.text must be a non-empty string."
+    return None
 
 
 def _operand_hint(operator):
@@ -364,6 +397,8 @@ def evaluate(request, policy, *, already_paid_ids=None):
     send to review. ``already_paid_ids`` must be an explicit collection of
     request IDs (possibly empty); None or malformed routes to review.
     ``approved_amount`` is the Decimal to pay on ``approve_full``, else None.
+    ``review_notes``, when present, are not read: the same allow list with or
+    without them returns the same decision, reason, matched rule, and amount.
     """
     version = _policy_version(policy)
     if not validate_policy(policy):
@@ -376,6 +411,7 @@ def evaluate(request, policy, *, already_paid_ids=None):
         if failure_reason is not None:
             return _result("review", failure_reason, version)
 
+    # review_notes are reviewer guidance only. Do not read them in rails or rules.
     for rule in policy["allow"]:
         rule_matches = True
         for group in rule["all_of"]:
