@@ -1,14 +1,15 @@
 """Local simulated review decisions.
 
-``data/working/review_decisions.json`` is the default log when the page calls
-these functions. Tests inject another path. Records are not payments:
-``simulated`` is always true. Customer and support note text is never stored.
-Appending the same ``request_id`` twice does not create a second record.
+The Reviews page keeps the log in memory for one Streamlit session.
+Tests inject a file path. Records are not payments: ``simulated`` is always
+true. Customer and support note text is never stored. Appending the same
+``request_id`` twice does not create a second record.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -63,16 +64,35 @@ def load_decisions(log_path: Path) -> list[dict]:
     return payload
 
 
-def already_paid_ids(log_path: Path) -> set[str]:
-    """Return logged ``approve_full`` and ``partial`` request ids.
+def index_decisions(records) -> dict[str, dict]:
+    """Return the stored record for each request id, first record wins."""
+    found: dict[str, dict] = {}
+    try:
+        items = list(records)
+    except TypeError:
+        return found
+    for record in items:
+        if not isinstance(record, dict):
+            continue
+        request_id = record.get("request_id")
+        if isinstance(request_id, str) and request_id.strip():
+            found.setdefault(request_id.strip(), record)
+    return found
 
-    The set is empty when nothing has been paid in the simulation. Rejected
-    ids are not included. The result is never None: ``evaluate_live`` treats
-    a missing collection as an invalid request.
+
+def paid_ids_in(records) -> set[str]:
+    """Return ``approve_full`` and ``partial`` request ids in ``records``.
+
+    Rejected ids are not included. The set is empty when nothing in the
+    list has been paid in the simulation. The result is never None.
     """
     paid: set[str] = set()
-    for record in load_decisions(log_path):
-        if record.get("action") not in _PAID_ACTIONS:
+    try:
+        items = list(records)
+    except TypeError:
+        return paid
+    for record in items:
+        if not isinstance(record, dict) or record.get("action") not in _PAID_ACTIONS:
             continue
         request_id = record.get("request_id")
         if isinstance(request_id, str) and request_id.strip():
@@ -80,18 +100,59 @@ def already_paid_ids(log_path: Path) -> set[str]:
     return paid
 
 
+def already_paid_ids(log_path: Path) -> set[str]:
+    """Return logged ``approve_full`` and ``partial`` request ids.
+
+    The set is empty when nothing has been paid in the simulation. Rejected
+    ids are not included. The result is never None: ``evaluate_live`` treats
+    a missing collection as an invalid request.
+    """
+    return paid_ids_in(load_decisions(log_path))
+
+
 def decided_ids(log_path: Path) -> dict[str, dict]:
     """Return the stored record for each request id, first record wins."""
-    found: dict[str, dict] = {}
-    for record in load_decisions(log_path):
-        request_id = record.get("request_id")
-        if isinstance(request_id, str) and request_id.strip():
-            found.setdefault(request_id.strip(), record)
-    return found
+    return index_decisions(load_decisions(log_path))
+
+
+def _append_memory(records: list, record: Mapping) -> tuple[dict, bool]:
+    """Append ``record`` to ``records`` unless its request id is already there."""
+    if not isinstance(records, list):
+        raise DecisionLogError(
+            "The decision log could not be written. Nothing new was decided."
+        )
+    request_id = record.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise DecisionLogError("A decision needs a request id. Nothing was written.")
+    for item in records:
+        if isinstance(item, dict) and item.get("request_id") == request_id:
+            return item, False
+    stored = dict(record)
+    records.append(stored)
+    return stored, True
+
+
+def _commit_decision(
+    log_path: Path | None,
+    records: list | None,
+    record: Mapping,
+) -> tuple[dict, bool]:
+    """Append to the in-memory list, or to the file when no list is passed."""
+    if records is not None:
+        return _append_memory(records, record)
+    if log_path is None:
+        raise DecisionLogError(
+            "The decision log could not be written. Nothing new was decided."
+        )
+    return append_decision(log_path, record)
 
 
 def append_decision(log_path: Path, record: Mapping) -> tuple[dict, bool]:
     """Append ``record`` unless its request id is already stored.
+
+    One exclusive lock covers the load and the replace, so two writers
+    cannot interleave a read-modify-write. The lock is a sibling file.
+    If it cannot be acquired, nothing is written.
 
     Returns the stored record and whether this call wrote it. A repeat id
     leaves the file unchanged and returns the original record.
@@ -99,39 +160,70 @@ def append_decision(log_path: Path, record: Mapping) -> tuple[dict, bool]:
     request_id = record.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
         raise DecisionLogError("A decision needs a request id. Nothing was written.")
-    existing = load_decisions(log_path)
-    for item in existing:
-        if item.get("request_id") == request_id:
-            return item, False
-    stored = dict(record)
-    existing.append(stored)
+
+    lock_path = log_path.with_name(log_path.name + ".lock")
     try:
-        _write_log(log_path, existing)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     except OSError as error:
         raise DecisionLogError(
-            "The decision log could not be written. Nothing new was decided."
+            "The decision log could not be locked. Nothing was written."
         ) from error
-    return stored, True
+
+    acquired = False
+    try:
+        try:
+            _acquire_exclusive_lock(lock_fd)
+        except OSError as error:
+            raise DecisionLogError(
+                "The decision log could not be locked. Nothing was written."
+            ) from error
+        acquired = True
+        existing = load_decisions(log_path)
+        for item in existing:
+            if item.get("request_id") == request_id:
+                return item, False
+        stored = dict(record)
+        existing.append(stored)
+        try:
+            _write_log(log_path, existing)
+        except OSError as error:
+            raise DecisionLogError(
+                "The decision log could not be written. Nothing new was decided."
+            ) from error
+        return stored, True
+    finally:
+        if acquired:
+            try:
+                _release_exclusive_lock(lock_fd)
+            except OSError:
+                pass
+        os.close(lock_fd)
 
 
 def record_auto_approval(
-    log_path: Path,
+    log_path: Path | None = None,
     *,
+    records: list | None = None,
     request_id: str,
     amount: Decimal | None,
     outcome_note: str,
     matched_rule: str,
     policy_file: str | None,
+    policy_version: object = None,
     clock: Callable[[], datetime] | None = None,
 ) -> tuple[dict, bool]:
     """Record one simulated auto ``approve_full`` decision.
 
     ``decided_by`` is ``auto``. ``matched_rule`` is the allow-rule id from
     ``evaluate_live``. The outcome note is that rule's plain sentence, also
-    stored as ``note``. Customer and support notes are not stored. A missing
-    rule id, a missing note, or a note longer than 280 characters raises
-    ``DecisionLogError`` and writes nothing. A second call for the same id
-    does not write.
+    stored as ``note``. ``policy_version`` is the version that evaluation
+    returned, stored as that int or str, or null when it is missing. A
+    missing version does not refuse the write. Customer and support notes
+    are not stored. A missing rule id, a missing note, a note longer than
+    280 characters, or an amount that is not already positive whole cents
+    raises ``DecisionLogError`` and writes nothing. A second call for the
+    same id does not write.
     """
     if not isinstance(matched_rule, str) or not matched_rule.strip():
         raise DecisionLogError("The matched rule is missing. Nothing was decided.")
@@ -141,6 +233,14 @@ def record_auto_approval(
         raise DecisionLogError(
             "The outcome note is missing or too long. Nothing was decided."
         )
+    if amount is not None:
+        # Sub-cent money must not be quantized into a payment.
+        accepted = positive_whole_cents(amount)
+        if accepted != amount:
+            raise DecisionLogError(
+                "The amount is not a positive whole-cent amount. Nothing was decided."
+            )
+        amount = accepted
     record = _base_record(
         request_id=request_id.strip(),
         action="approve_full",
@@ -152,12 +252,14 @@ def record_auto_approval(
         clock=clock,
     )
     record["outcome_note"] = cleaned_note
-    return append_decision(log_path, record)
+    record["policy_version"] = _stored_policy_version(policy_version)
+    return _commit_decision(log_path, records, record)
 
 
 def record_reviewer_decision(
-    log_path: Path,
+    log_path: Path | None = None,
     *,
+    records: list | None = None,
     request_id: str,
     action: str,
     requested_amount: object,
@@ -186,7 +288,12 @@ def record_reviewer_decision(
         return _refused("That action is not a simulated decision. Nothing was decided.")
 
     try:
-        already = decided_ids(log_path)
+        if records is not None:
+            already = index_decisions(records)
+        elif log_path is not None:
+            already = decided_ids(log_path)
+        else:
+            return _refused("The decision log could not be read. Nothing new was decided.")
     except DecisionLogError as error:
         return _refused(str(error))
     identity = request_id.strip()
@@ -216,7 +323,7 @@ def record_reviewer_decision(
     record["matched_rule"] = None
     record["outcome_note"] = cleaned_note
     try:
-        stored, created = append_decision(log_path, record)
+        stored, created = _commit_decision(log_path, records, record)
     except DecisionLogError as error:
         return _refused(str(error))
     if not created:
@@ -363,6 +470,43 @@ def _decimal_text(amount: Decimal | None) -> str | None:
     if amount is None:
         return None
     return format(amount.quantize(_CENTS), "f")
+
+
+def _stored_policy_version(value: object) -> int | str | None:
+    """Keep an int or str version. Anything else, including a missing one, is null."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) or isinstance(value, str):
+        return value
+    return None
+
+
+def _acquire_exclusive_lock(lock_fd: int) -> None:
+    """Lock one byte of the sibling file. Raises ``OSError`` if it is busy."""
+    if os.lseek(lock_fd, 0, os.SEEK_END) == 0:
+        os.write(lock_fd, b"\0")
+    os.lseek(lock_fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _release_exclusive_lock(lock_fd: int) -> None:
+    """Release the sibling lock. The caller still closes the descriptor."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
 
 def _policy_file_name(value: object) -> str | None:

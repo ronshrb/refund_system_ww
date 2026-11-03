@@ -30,6 +30,8 @@ _POLICY_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
 BUILD_POLICY_TOOL_NAME = "build_policy"
 QUERY_HISTORY_TOOL_NAME = "query_history"
 _CENT = Decimal("0.01")
+# Sample rows omit decision and decided_by so the model cannot copy a past
+# outcome. by_decision counts stay on the result as descriptive totals.
 _HISTORY_SAMPLE_FIELDS = (
     "request_id",
     "amount_usd",
@@ -39,8 +41,6 @@ _HISTORY_SAMPLE_FIELDS = (
     "fraud_flag",
     "category",
     "payment_method",
-    "decision",
-    "decided_by",
 )
 
 

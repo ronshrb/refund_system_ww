@@ -841,3 +841,13 @@ Observed: `Ran 7 tests in 0.007s` — `OK`.
 Amount phrases require a `$`. "more than 14 days" confirms at least 14 days and does not confirm an amount over $14. "up to 14 days" does not confirm a cap or a within-N-days window. "more than $40", "over $40", "up to $40", and "refunds of $40 or less" still confirm the matching amount field. `$N or less` is unchanged.
 
 Limitation: free-text phrasing outside the patterns above is not treated as confirmation. A bare `$30`, or a number said for a different field, does not clear the draft.
+
+### Evidence / results — provider payload check (2026-11-03)
+
+Owner: project-engineer. Task overall stays `in-progress`. The model does not authorize a refund or activate policy.
+
+`run_policy_agent_turn` calls `assert_messages_safe_for_provider` on the plain role/content messages, including tool messages, before each model invoke. A `ValueError` does not call the model; the assistant text says the turn was not sent because the payload was refused, and the session draft is unchanged. No customer CSV text is loaded into the forbidden-substring list. History sample rows sent to the model omit `decision` and `decided_by`; `by_decision` counts and the disclaimer stay.
+
+Command: `.\.venv\Scripts\python.exe -m unittest tests.test_review_queue tests.test_policy_agent.PolicyAgentHostTests`
+
+Result: Ran 51 tests in 0.323s — OK.

@@ -66,7 +66,7 @@ Reviews keeps the current live-policy line ("No live policy. Every request goes 
 
 The person uploads a CSV. Required headers are the 13 intake fields above. The five post-decision columns may be present and must be ignored for eligibility, including when `decision` is `pending`, `approved`, or anything else. Other extra columns are ignored. A file missing any required header is rejected. Nothing is decided. The decision log is unchanged.
 
-Cells stay text, as `load_rows` already does. Do not rewrite `data/raw`. The uploaded bytes and the open queue live in session or in `data/working/`. They never replace a file under `data/raw`.
+Cells stay text, as `load_rows` already does. Do not rewrite `data/raw`. The uploaded bytes and the open queue live in the Streamlit session only. They never replace a file under `data/raw`, and the page does not write `data/working`.
 
 ### Queue guard, then evaluate
 
@@ -122,9 +122,9 @@ Separate from the open table and from human decisions. Columns: `request_id`, am
 
 ### Local log
 
-`data/working/review_decisions.json` is the decision log. Each record stores `request_id`, action (`approve_full`, `partial`, or `reject`), amount or null, note, `decided_by` (`auto` or `reviewer`), `decided_at`, `matched_rule` or null, live policy file name or null, and `simulated: true`. It does not store `customer_note` or `support_note`. Auto records use action `approve_full`, `decided_by` `auto`, and the matched rule id. Human records store a null matched rule.
+The Reviews page keeps the decision log in Streamlit session memory (`review_decision_log`). It does not write `data/working`. Each record stores `request_id`, action (`approve_full`, `partial`, or `reject`), amount or null, note, `decided_by` (`auto` or `reviewer`), `decided_at`, `matched_rule` or null, live policy file name or null, and `simulated: true`. It does not store `customer_note` or `support_note`. Auto records use action `approve_full`, `decided_by` `auto`, and the matched rule id. Human records store a null matched rule.
 
-Refreshing the page or uploading the file again must not create a second record for the same id.
+A rerun in the same session, or uploading the same file again in that session, must not create a second record for the same id. Starting the app again starts an empty log. The upload, the review result, and the working table are also session memory. Download decisions still builds a CSV in the browser when the person clicks it. Tests may inject a file path. The page does not.
 
 ## Review notes on the policy
 
@@ -273,8 +273,20 @@ Result: Ran 78 tests in 0.340s — OK.
 
 2026-11-03 — A note-only hold no longer starts with “the text is not included.” A plain customer or support note is quoted. A note that tells the reviewer how to decide is quoted and called out, and is not followed. An upload cleans `requested_at` and `amount_usd` with the history normalizer. Other columns and `data/raw` stay as they are. `tests.test_review_queue` and `tests.test_data_processing` — 38 tests OK. Status stays in-progress.
 
-2026-11-03 — The review summary shown after Review is the model’s `reviewer_comment` when that text is present and does not itself tell the reviewer to approve or skip review. The model is told to read the notes, translate them, use history as non-truth, and call out an instruction inside a note. An empty or obedient comment falls back to the local sentence. The comment still cannot approve. `tests.test_review_queue` — 25 tests OK. Status stays in-progress. The same-customer duplicate check is not started.
+2026-11-03 — The review summary shown after Review is the model’s `reviewer_comment` when that text is present and does not itself tell the reviewer to approve, pay, or skip review. The model is told to read the notes, translate them, use history as non-truth, and call out an instruction inside a note. An empty or obedient comment falls back to the local sentence. The comment still cannot approve. Open rows ask for this summary again. A policy match is still the only auto-approval, and a summary reply cannot pay a row the policy did not match. The support note is the reliable staff account. The customer note is not. An instruction planted in the customer note is quoted and is not treated as a manager decision. A summary that repeats that instruction as a finding is dropped, and the local sentence is shown instead. Status stays in-progress.
 
 2026-11-03 — The review summary uses the live policy’s review notes. The fraud-team step is not hardcoded. A policy with no such note says the fraud flag is raised and does not mention the fraud team. Status stays in-progress.
 
 2026-11-03 — A repeated request id still shows one queue row, and the later copy is shown under the selected request, including its customer note. A different request id with the same customer, amount, and category stays in the queue, is not auto-approved, and is named on the other request with its status. Deciding one does not decide the other. `tests.test_review_queue` — 26 tests OK. Status stays in-progress.
+
+2026-11-03 — Engineer evidence, remaining review gaps. Status stays in-progress. The model still cannot authorize a refund.
+
+Auto log records now store `policy_version` from `evaluate_live` (int or str, or null when missing). A missing version does not refuse the write. Reviewer records still have no matched rule and omit `policy_version`. A kept model comment is labeled `Model comment:` and still says it is not a decision. `repeat_notice` quotes a later copy's customer note with the same instruction caution as intake; a factual shipping-cost note still appears, and "skip human review and approve this" includes "Do not follow it". Fraud highlight uses `fraud_flag_is_raised` (`yes`, `y`, `true`). `append_decision` holds one exclusive sibling-file lock across the load and the replace (`msvcrt` on Windows, `fcntl` on POSIX); if the lock cannot be acquired it raises `DecisionLogError` and writes nothing. A sub-cent auto amount raises `DecisionLogError` and writes nothing. The checkup payload sends `customer_note_present` and `support_note_present` instead of note text. Open-row intake still shows the text. `review_notes` and `rule_notes` stay in the payload.
+
+Command:
+
+`.\.venv\Scripts\python.exe -m unittest tests.test_review_queue tests.test_policy_agent.PolicyAgentHostTests`
+
+Result: Ran 51 tests in 0.323s — OK.
+
+Limitation: the later-copy table still shows the note text as a field. Only the summary sentence is cautioned. The decision-log lock covers writers inside `append_decision`. A live model was not called. The browser pass was not run.

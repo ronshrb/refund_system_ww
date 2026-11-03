@@ -21,18 +21,24 @@ import pandas as pd
 
 from utils.data.data_processing import normalize_data, normalize_date_column, parse_amount
 from utils.policy.live_policy import evaluate_live, explain_rule, read_live_policy
+from utils.policy.policy_evaluator import fraud_flag_is_raised
 from utils.review.decisions import (
     DecisionLogError,
     already_paid_ids,
     decided_ids,
+    index_decisions,
+    paid_ids_in,
     record_auto_approval,
 )
 from utils.review.review_agent import (
     CHECKUP_INCOMPLETE_COMMENT,
     build_checkup_payload,
     build_reviewer_comment,
+    build_summary_payload,
     checkup_match,
     comment_directs_approval_or_skip,
+    draft_review_summary,
+    quoted_note,
 )
 
 # Intake columns required on upload, in file order through fraud_flag.
@@ -142,12 +148,14 @@ def project_intake(row: Mapping) -> dict[str, str]:
 def classify_upload(
     rows,
     *,
-    log_path: Path,
+    log_path: Path | None = None,
+    log_records: list | None = None,
     policies_dir: Path | None = None,
     fieldnames: list[str] | None = None,
     clock=None,
     chat_model=None,
     agent=None,
+    summarizer=None,
     history_rows=None,
 ) -> dict:
     """Split uploaded string rows into errors, auto, open, and already decided.
@@ -164,6 +172,11 @@ def classify_upload(
     empty list and is not written. ``chat_model`` is injected by tests.
     ``agent``, when passed, replaces the checkup so the page can cache one
     request id. It is not called for a row the policy did not match.
+    ``summarizer``, when passed, writes the review summary for an open row
+    and can be cached by request id. A summary cannot approve. An empty or
+    obedient summary uses the local sentence. ``log_records`` is an
+    in-memory log. When it is passed, this function does not read or write
+    a file. ``log_path`` is used only when no list is passed.
     """
     try:
         materialized = list(rows)
@@ -184,9 +197,18 @@ def classify_upload(
             columns=missing,
         )])
 
+    if log_records is None and not isinstance(log_path, Path):
+        return _empty_result([_error(
+            "log_unreadable",
+            "The decision log could not be read. Nothing was decided.",
+        )])
     try:
-        logged = decided_ids(log_path)
-        paid = already_paid_ids(log_path)
+        if log_records is not None:
+            logged = index_decisions(log_records)
+            paid = paid_ids_in(log_records)
+        else:
+            logged = decided_ids(log_path)
+            paid = already_paid_ids(log_path)
     except DecisionLogError as error:
         return _empty_result([_error("log_unreadable", str(error))])
 
@@ -246,13 +268,27 @@ def classify_upload(
         intake = project_intake(first_row[identity])
         extra = counts[identity] - 1
         if extra > 0:
-            # Repeated in this file. First row only. Do not evaluate.
-            open_rows.append(_open_row(identity, intake, extra_row_count=extra, reason=None))
+            # Repeated in this file. First row only. Do not evaluate or pay.
+            open_rows.append(_open_row(
+                identity,
+                intake,
+                extra_row_count=extra,
+                reason=None,
+                reviewer_comment=_open_summary(
+                    identity,
+                    intake,
+                    {},
+                    policy,
+                    history,
+                    chat_model=chat_model,
+                    summarizer=summarizer,
+                ),
+            ))
             continue
         result = evaluated[identity]
         matched = _is_policy_match(result)
         # Same customer, amount, and category stays with a person even when
-        # the policy matches. Do not call the model and do not pay.
+        # the policy matches. The summary cannot pay.
         if identity in repeats:
             reason = "possible_repeat" if matched else _reason_text(result)
             open_rows.append(_open_row(
@@ -260,7 +296,15 @@ def classify_upload(
                 intake,
                 extra_row_count=0,
                 reason=reason,
-                reviewer_comment=_local_comment(intake, result, policy),
+                reviewer_comment=_open_summary(
+                    identity,
+                    intake,
+                    result,
+                    policy,
+                    history,
+                    chat_model=chat_model,
+                    summarizer=summarizer,
+                ),
             ))
             continue
         if not matched:
@@ -270,7 +314,15 @@ def classify_upload(
                 intake,
                 extra_row_count=0,
                 reason=_reason_text(result),
-                reviewer_comment=_local_comment(intake, result, policy),
+                reviewer_comment=_open_summary(
+                    identity,
+                    intake,
+                    result,
+                    policy,
+                    history,
+                    chat_model=chat_model,
+                    summarizer=summarizer,
+                ),
             ))
             continue
         # The agent is the last step for a policy match, including one with
@@ -289,6 +341,7 @@ def classify_upload(
             _store_match(
                 auto, open_rows, already, errors, logged, paid,
                 log_path=log_path,
+                log_records=log_records,
                 identity=identity,
                 intake=intake,
                 result=result,
@@ -455,7 +508,10 @@ def detail_fields(open_row: Mapping) -> list[tuple[str, str]]:
 
 
 def style_selected_request(fields: list[tuple[str, str]]):
-    """Key-value table for the selected request. A fraud flag of yes is red."""
+    """Key-value table for the selected request. A raised fraud flag is red.
+
+    Raised tokens are the same set the evaluator uses: yes, y, and true.
+    """
     frame = pd.DataFrame(
         {"value": [value for _key, value in fields]},
         index=[key for key, _value in fields],
@@ -465,8 +521,7 @@ def style_selected_request(fields: list[tuple[str, str]]):
         styles = pd.DataFrame("", index=shown.index, columns=shown.columns)
         if "fraud_flag" not in shown.index:
             return styles
-        flag = shown.at["fraud_flag", "value"]
-        if isinstance(flag, str) and flag.strip().casefold() == "yes":
+        if fraud_flag_is_raised(shown.at["fraud_flag", "value"]):
             styles.at["fraud_flag", "value"] = "color: red"
         return styles
 
@@ -587,11 +642,12 @@ def repeat_notice(later: list[Mapping], related: list[Mapping]) -> str:
         for copy in later:
             text = copy.get("customer_note")
             if isinstance(text, str) and text.strip():
-                note = text.strip().rstrip(".")
+                note = text
                 break
         sentence = "A later copy of this request is in the file and was not reviewed separately."
         if note:
-            sentence = f"{sentence} Customer note says {note}."
+            # Same caution as an intake note: an instruction is not an order.
+            sentence = f"{sentence} {quoted_note('Customer note', note)}."
         parts.append(sentence)
     if related:
         described = [
@@ -790,6 +846,39 @@ def _local_comment(intake: Mapping, result: Mapping, policy) -> str:
     )
 
 
+def _open_summary(
+    identity: str,
+    intake: Mapping,
+    result: Mapping,
+    policy,
+    history,
+    *,
+    chat_model,
+    summarizer,
+) -> str:
+    """The agent's review summary, or the local sentence when that call fails.
+
+    The summary is not a decision. A reply cannot move the row to auto.
+    """
+    payload = build_summary_payload(
+        intake=intake,
+        policy_result=result if isinstance(result, Mapping) else {},
+        policy=policy if isinstance(policy, Mapping) else None,
+        history_rows=history,
+    )
+    text = ""
+    try:
+        if summarizer is not None:
+            text = summarizer(payload, request_id=identity)
+        elif chat_model is not None:
+            text = draft_review_summary(payload, chat_model=chat_model)
+    except Exception:
+        text = ""
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return _local_comment(intake, result if isinstance(result, Mapping) else {}, policy)
+
+
 def _explain_matched_rule(policy, matched_rule: object) -> str:
     """Plain sentence for the allow rule ``evaluate_live`` matched."""
     if not isinstance(policy, Mapping) or not isinstance(matched_rule, str):
@@ -812,7 +901,8 @@ def _store_match(
     logged: dict,
     paid: set,
     *,
-    log_path: Path,
+    log_path: Path | None,
+    log_records: list | None,
     identity: str,
     intake: Mapping,
     result: Mapping,
@@ -842,11 +932,13 @@ def _store_match(
     try:
         stored, created = record_auto_approval(
             log_path,
+            records=log_records,
             request_id=identity,
             amount=amount,
             outcome_note=sentence,
             matched_rule=rule_id,
             policy_file=policy_file,
+            policy_version=result.get("policy_version"),
             clock=clock,
         )
     except DecisionLogError as error:

@@ -1,5 +1,7 @@
 """Focused tests for the live policy pointer. Uses temp directories only."""
 
+import csv
+import io
 import json
 import tempfile
 import unittest
@@ -13,8 +15,10 @@ from utils.policy.live_policy import (
     live_file_select_index,
     make_live,
     make_live_button_disabled,
-    approvals_csv,
+    HISTORY_COLUMNS,
+    history_evaluation_csv,
     auto_approval_split,
+    channel_success,
     historical_auto_approvals,
     history_outcome_rates,
     preview_auto_approvals,
@@ -317,12 +321,36 @@ class LivePolicyTests(unittest.TestCase):
         self.assertEqual(
             [row["request_id"] for row in recorded], ["RF-still", "RF-drop"]
         )
-        csv_text = approvals_csv(
-            preview_auto_approvals(_MATCHING_POLICY, rows)
+        csv_text = history_evaluation_csv(
+            rows, preview_auto_approvals(_MATCHING_POLICY, rows)
         )
-        self.assertIn("RF-sooner", csv_text)
-        self.assertIn("response_days", csv_text)
-        self.assertNotIn("review_minutes", csv_text)
+        exported = list(csv.DictReader(io.StringIO(csv_text)))
+        self.assertEqual(
+            [row["request_id"] for row in exported],
+            [row["request_id"] for row in rows],
+        )
+        self.assertEqual(list(exported[0]), list(HISTORY_COLUMNS))
+        sooner = next(row for row in exported if row["request_id"] == "RF-sooner")
+        self.assertEqual(sooner["decision"], "approved")
+        self.assertEqual(sooner["decided_by"], "auto")
+        self.assertEqual(sooner["outcome_note"], "")
+        self.assertEqual(sooner["decided_at"], "2026-06-03 16:06")
+        self.assertEqual(sooner["review_minutes"], "")
+        still = next(row for row in exported if row["request_id"] == "RF-still")
+        self.assertEqual(still["decided_by"], "auto")
+        self.assertEqual(still["decided_at"], "")
+        self.assertEqual(still["review_minutes"], "")
+        dropped = next(row for row in exported if row["request_id"] == "RF-drop")
+        self.assertEqual(dropped["fraud_flag"], "no")
+        self.assertEqual(dropped["decision"], "")
+        self.assertEqual(dropped["decided_by"], "")
+        self.assertEqual(dropped["outcome_note"], "")
+        self.assertEqual(dropped["decided_at"], "")
+        self.assertEqual(dropped["review_minutes"], "")
+        self.assertEqual(
+            [row["decision"] for row in exported if row["request_id"] == "RF-dup"],
+            ["", ""],
+        )
         split = auto_approval_split(
             preview_auto_approvals(_MATCHING_POLICY, rows),
             historical_auto_approvals(rows),
@@ -333,3 +361,135 @@ class LivePolicyTests(unittest.TestCase):
         self.assertEqual(split["new_dollars"], Decimal("65.00"))
         self.assertEqual(split["dropped_count"], 1)
         self.assertEqual(split["dropped_dollars"], Decimal("525.00"))
+
+    def test_channel_success_separates_new_principal_fee_minutes_and_notes(self):
+        # Hand check: four new autos ($40 + $12.49 + $8 + $40 = $100.49, fee $100,
+        # minutes 10.5 + blank + unparseable + 4 = 14.5). The still-auto's 40
+        # minutes and the leaving auto's appeal note stay out of those totals.
+        rows = [
+            _matching_request(
+                request_id="RF-new-cb",
+                amount_usd="$40.00",
+                decided_by="J. Alvarez",
+                decision="approved",
+                review_minutes="10.5",
+                outcome_note="Customer opened a Chargeback",
+            ),
+            _matching_request(
+                request_id="RF-new-blank-min",
+                amount_usd="$12.49",
+                decided_by="S. Kwan",
+                decision="approved",
+                review_minutes="",
+                outcome_note="settled",
+            ),
+            _matching_request(
+                request_id="RF-new-bad-min",
+                amount_usd="$8.00",
+                decided_by="human",
+                decision="denied",
+                review_minutes="n/a",
+                outcome_note="ok",
+            ),
+            _matching_request(
+                request_id="RF-denied-label",
+                amount_usd="$40.00",
+                decided_by="human",
+                decision="rejected",
+                review_minutes="4",
+                outcome_note="   ",
+            ),
+            _matching_request(
+                request_id="RF-still",
+                amount_usd="$20.00",
+                decided_by="auto",
+                decision="approved",
+                review_minutes="40",
+                outcome_note="recorded auto",
+            ),
+            _matching_request(
+                request_id="RF-appeal",
+                amount_usd="$500.00",
+                decided_by="Auto",
+                decision="approved",
+                review_minutes="30",
+                outcome_note="Likely to appeal",
+            ),
+            _matching_request(
+                request_id="RF-neither",
+                amount_usd="$500.00",
+                decided_by="J. Alvarez",
+                decision="denied",
+            ),
+            _matching_request(
+                request_id="RF-dup",
+                decided_by="auto",
+                decision="approved",
+                review_minutes="100",
+                outcome_note="",
+            ),
+            _matching_request(
+                request_id="RF-dup",
+                decided_by="J. Alvarez",
+                decision="approved",
+                review_minutes="5",
+                outcome_note="chargeback on the copy",
+            ),
+        ]
+        result = channel_success(_MATCHING_POLICY, rows)
+        split = auto_approval_split(
+            preview_auto_approvals(_MATCHING_POLICY, rows),
+            historical_auto_approvals(rows),
+        )
+
+        self.assertEqual(result["new_count"], 4)
+        self.assertEqual(result["dropped_count"], 1)
+        self.assertEqual(result["still_count"], 1)
+        self.assertEqual(result["new_count"], split["new_count"])
+        self.assertEqual(result["dropped_count"], split["dropped_count"])
+        self.assertEqual(result["still_count"], split["still_count"])
+        self.assertEqual(result["policy_auto_count"], 5)
+        self.assertEqual(result["new_principal"], Decimal("100.49"))
+        self.assertEqual(result["new_fee"], Decimal("100"))
+        self.assertEqual(result["new_minutes"], Decimal("14.5"))
+        self.assertEqual(result["harm_note_count"], 1)
+        self.assertEqual(result["blank_outcome_notes"], 3)
+        self.assertEqual(result["outcome_note_rows"], 9)
+
+        empty = channel_success({"version": 1, "allow": []}, rows)
+        self.assertEqual(empty["policy_auto_count"], 0)
+        self.assertEqual(empty["new_count"], 0)
+        self.assertEqual(empty["still_count"], 0)
+        self.assertEqual(empty["new_principal"], Decimal("0"))
+        self.assertEqual(empty["new_fee"], Decimal("0"))
+        self.assertEqual(empty["new_minutes"], Decimal("0"))
+        self.assertEqual(empty["harm_note_count"], 0)
+        self.assertEqual(empty["dropped_count"], 2)
+        self.assertEqual(empty["blank_outcome_notes"], 3)
+        self.assertEqual(empty["outcome_note_rows"], 9)
+
+        missing = channel_success(None, object())
+        self.assertEqual(missing["new_count"], 0)
+        self.assertEqual(missing["outcome_note_rows"], 0)
+        with self.assertRaisesRegex(TypeError, "iterable of mappings"):
+            channel_success({"version": 1, "allow": []}, None)
+        with self.assertRaisesRegex(TypeError, "every request row must be a mapping"):
+            channel_success({"version": 1, "allow": []}, ["not-a-row"])
+
+    def test_policy_picker_keeps_channel_success_and_compare_changes(self):
+        page = (
+            Path(__file__).resolve().parents[1] / "app" / "pages" / "policy_management.py"
+        )
+        source = page.read_text(encoding="utf-8")
+        self.assertIn("channel_success(", source)
+        self.assertIn("Evaluated on history", source)
+        self.assertIn("Download data", source)
+        self.assertIn(
+            "Compared with auto approved requests from history data", source
+        )
+        self.assertIn("Auto-approve change", source)
+        self.assertNotIn("Would auto-approve", source)
+        self.assertNotIn("Review minutes", source)
+        self.assertNotIn("Request dollars", source)
+        self.assertNotIn("Harm notes", source)
+        self.assertIn("_render_comparison(", source)

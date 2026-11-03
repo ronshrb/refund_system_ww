@@ -347,6 +347,28 @@ def _guard_note(topics: Sequence[str]) -> str:
     )
 
 
+_PAYLOAD_REFUSED_TEXT = (
+    "This turn was not sent because the payload was refused. "
+    "The session draft is unchanged."
+)
+
+
+class _ProviderPayloadRefused(Exception):
+    """The messages were not sent. The model was not called."""
+
+    def __init__(self, messages: list[dict[str, Any]]) -> None:
+        super().__init__(_PAYLOAD_REFUSED_TEXT)
+        self.messages = messages
+
+
+def _messages_for_provider_check(messages: Sequence[Any]) -> list[dict[str, Any]]:
+    """LangChain messages as plain role/content maps, including tool messages."""
+    return [
+        {"role": item.get("role", ""), "content": item.get("content", "")}
+        for item in _to_plain_messages(messages)
+    ]
+
+
 def build_agent_graph(chat_model: Any) -> Any:
     """Compile the agent loop: model → (tools → model)* → guard → end.
 
@@ -355,10 +377,20 @@ def build_agent_graph(chat_model: Any) -> Any:
     ``proposed`` build result. The ``guard`` node checks the final reply in
     code: if it asks about a topic the manager never raised, the reply is
     dropped and the model gets one retry with a host note.
+
+    Before each model call, the outgoing messages are checked. A refused
+    payload is not sent. That refusal does not authorize a refund or change
+    the session draft.
     """
     model_with_tools = chat_model.bind_tools(registered_tool_schemas())
 
     def call_model(state: AgentState) -> dict[str, Any]:
+        outgoing = _messages_for_provider_check(state["messages"])
+        try:
+            # Do not scan customer CSV text for forbidden strings.
+            assert_messages_safe_for_provider(outgoing)
+        except ValueError as error:
+            raise _ProviderPayloadRefused(outgoing) from error
         return {"messages": [model_with_tools.invoke(state["messages"])]}
 
     def run_tools(state: AgentState) -> dict[str, Any]:
@@ -481,6 +513,7 @@ def run_policy_agent_turn(
         sent again through ``on_text_delta``.
     """
     draft = deepcopy(dict(current_draft))
+    unchanged_draft = deepcopy(draft)
     if chat_model is None:
         chat_model = make_chat_model(provider, api_key=api_key)
 
@@ -554,6 +587,16 @@ def run_policy_agent_turn(
                     current_id = chunk.id
                 spoke = True
                 on_text_delta(text)
+    except _ProviderPayloadRefused as refused:
+        # The model was not called. Keep the draft from before this turn.
+        return {
+            "assistant_text": str(refused),
+            "draft": unchanged_draft,
+            "draft_updated": False,
+            "preview_summary": None,
+            "tool_results": [],
+            "provider_messages": refused.messages,
+        }
     except GraphRecursionError:
         stopped_early = True
 

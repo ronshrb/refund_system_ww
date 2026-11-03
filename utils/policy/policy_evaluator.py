@@ -43,6 +43,17 @@ _FRAUD_CLEAR = {"no", "n", "false"}
 _FRAUD_RAISED = {"yes", "y", "true"}
 
 
+def fraud_flag_is_raised(value: object) -> bool:
+    """Return whether ``value`` is a raised fraud flag.
+
+    Raised tokens are ``yes``, ``y``, and ``true`` after strip and casefold.
+    A non-string is false. ``no``, ``n``, and ``false`` are not raised.
+    """
+    if not isinstance(value, str):
+        return False
+    return value.strip().casefold() in _FRAUD_RAISED
+
+
 def _policy_version(policy):
     if not isinstance(policy, Mapping):
         return None

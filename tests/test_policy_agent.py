@@ -17,7 +17,7 @@ from typing import Any
 from unittest.mock import patch
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
@@ -971,10 +971,13 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertGreaterEqual(result["match_count"], 1)
         self.assertLessEqual(len(result["sample_rows"]), 3)
         self.assertIn("disclaimer", result)
+        self.assertIn("by_decision", result)
         for row in result["sample_rows"]:
             self.assertEqual(normalize_reason(row.get("stated_reason")), "changed_mind")
             self.assertNotIn("customer_note", row)
             self.assertNotIn("support_note", row)
+            self.assertNotIn("decision", row)
+            self.assertNotIn("decided_by", row)
 
     def test_query_history_folds_aliases_and_rejects_negative_days(self):
         from utils.policy import policy_agent_utils as utils
@@ -996,6 +999,11 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertEqual(damaged_row["stated_reason"], "damaged")
         self.assertNotIn("customer_note", damaged_row)
         self.assertNotIn("support_note", damaged_row)
+        self.assertNotIn("decision", damaged_row)
+        self.assertNotIn("decided_by", damaged_row)
+        for row in damaged["sample_rows"]:
+            self.assertNotIn("decision", row)
+            self.assertNotIn("decided_by", row)
 
         alias_filter = utils.query_history(
             {
@@ -1041,6 +1049,50 @@ class PolicyAgentHostTests(unittest.TestCase):
             row for row in clear_fraud["sample_rows"] if row["request_id"] == "RF-2066"
         )
         self.assertEqual(fraud_row["fraud_flag"], "N")
+        for sample in (
+            damaged["sample_rows"],
+            alias_filter["sample_rows"],
+            negative_days["sample_rows"],
+            clear_fraud["sample_rows"],
+        ):
+            for row in sample:
+                self.assertNotIn("customer_note", row)
+                self.assertNotIn("support_note", row)
+                self.assertNotIn("decision", row)
+                self.assertNotIn("decided_by", row)
+
+    def test_refused_provider_payload_does_not_call_the_model(self):
+        current = _template_draft()
+        before = deepcopy(current)
+        model = _ScriptedChatModel(replies=[AIMessage(content="should not be called")])
+        seen: list[list[dict]] = []
+
+        def refuse(messages, **kwargs):
+            seen.append(list(messages))
+            raise ValueError("refused in test")
+
+        tool_maps = policy_agent._messages_for_provider_check([
+            ToolMessage(content="{}", tool_call_id="call_1", name="query_history"),
+        ])
+        self.assertEqual(tool_maps, [{"role": "tool", "content": "{}"}])
+
+        with patch.object(policy_agent, "assert_messages_safe_for_provider", refuse):
+            turn = policy_agent.run_policy_agent_turn(
+                user_text="Allow changed_mind under $25.",
+                history=[],
+                current_draft=current,
+                chat_model=model,
+            )
+
+        self.assertIn("not sent", turn["assistant_text"])
+        self.assertIn("payload was refused", turn["assistant_text"])
+        self.assertFalse(turn["draft_updated"])
+        self.assertEqual(turn["draft"], before)
+        self.assertEqual(current, before)
+        self.assertEqual(model.seen, [])
+        self.assertEqual(turn["tool_results"], [])
+        self.assertTrue(seen)
+        self.assertTrue(all({"role", "content"} <= set(item) for item in seen[0]))
 
     def test_ensure_session_defaults_initializes_template_draft(self):
         state: dict = {}

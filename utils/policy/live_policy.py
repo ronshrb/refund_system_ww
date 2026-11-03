@@ -39,6 +39,33 @@ _POST_DECISION_FIELDS = frozenset({
     "review_minutes",
 })
 
+# Column order of data/raw/history.csv. The download uses this order.
+HISTORY_COLUMNS = (
+    "request_id",
+    "requested_at",
+    "customer_id",
+    "tenure_months",
+    "prior_refunds_12m",
+    "amount_usd",
+    "category",
+    "payment_method",
+    "stated_reason",
+    "customer_note",
+    "support_note",
+    "days_since_delivery",
+    "fraud_flag",
+    "decision",
+    "decided_by",
+    "outcome_note",
+    "decided_at",
+    "review_minutes",
+)
+# Last five history columns, from decision through review_minutes. On an
+# auto-approved row the download writes approved / auto / the recorded
+# timestamp and leaves the note and minutes blank. Every other row leaves
+# all five blank.
+_DOWNLOAD_VALUE_COLUMNS = HISTORY_COLUMNS[-5:]
+
 # Closed-schema operators, in manager-sentence order. Unknown keys are not listed.
 _OPERATOR_ORDER = (
     "stated_reason",
@@ -357,6 +384,101 @@ def auto_approval_split(selected_matches, other_matches) -> dict[str, int | Deci
     }
 
 
+def channel_success(policy, history_rows) -> dict[str, int | Decimal]:
+    """Compare one policy with the old auto channel on the same history rows.
+
+    Duplicate request ids are dropped entirely, as in ``preview_auto_approvals``.
+    Post-decision fields are not passed to ``evaluate``. Historical ``decision``
+    is not an eligibility label. ``decided_by`` auto is the old channel
+    (``_was_auto``).
+
+    ``new_count``, ``dropped_count``, and ``still_count`` match
+    ``auto_approval_split`` of this policy's preview against
+    ``historical_auto_approvals``. ``new_principal`` sums parsed request
+    amounts on the newly auto-approved rows and does not include
+    ``AUTO_REFUND_FEE``. ``new_fee`` is that fee once per newly auto-approved
+    row whose amount parses. A row with no parsed amount adds neither.
+    ``new_minutes`` sums ``review_minutes`` on newly auto-approved rows only.
+    Blank or unparseable minutes add nothing. Rows leaving auto do not
+    contribute minutes.
+
+    ``harm_note_count`` counts policy auto-approvals whose ``outcome_note``
+    contains "chargeback" or "appeal", case insensitive.
+    ``blank_outcome_notes`` and ``outcome_note_rows`` count every history row,
+    including duplicate ids. Blank means missing or whitespace-only.
+
+    A policy that is not a mapping returns zeros and does not read the rows,
+    matching ``_intake_rows``. An unlisted history or a non-mapping row raises
+    the same ``TypeError``. An empty allow list auto-approves nobody.
+    """
+    if not isinstance(policy, Mapping):
+        return _empty_channel_success()
+
+    # Same listing rules as _intake_rows. List first so a generator is not consumed
+    # before the raw-file note counts.
+    try:
+        rows = list(history_rows)
+    except TypeError as error:
+        raise TypeError("request_rows must be an iterable of mappings") from error
+    if any(not isinstance(row, Mapping) for row in rows):
+        raise TypeError("every request row must be a mapping")
+
+    result = _empty_channel_success()
+    result["outcome_note_rows"] = len(rows)
+    result["blank_outcome_notes"] = sum(1 for row in rows if _outcome_note_blank(row))
+
+    policy_by_id: dict[str, tuple[Mapping, dict]] = {}
+    old_ids: set[str] = set()
+    for row, projected in _intake_rows(policy, rows):
+        # projected has no decision, decided_by, outcome_note, or review_minutes.
+        would_auto = (
+            evaluate(projected, policy, already_paid_ids=set())["decision"] == "approve_full"
+        )
+        request_id = row.get("request_id")
+        key = request_id.strip() if isinstance(request_id, str) else ""
+        if would_auto:
+            result["policy_auto_count"] += 1
+            # A note on a row this file would auto-approve. Not a loss amount.
+            if _note_mentions_harm(row):
+                result["harm_note_count"] += 1
+            if key:
+                policy_by_id[key] = (row, projected)
+        if key and _was_auto(row):
+            old_ids.add(key)
+
+    policy_ids = set(policy_by_id)
+    new_ids = policy_ids - old_ids
+    result["new_count"] = len(new_ids)
+    result["still_count"] = len(policy_ids & old_ids)
+    result["dropped_count"] = len(old_ids - policy_ids)
+
+    for key in new_ids:
+        row, projected = policy_by_id[key]
+        amount = parse_amount(projected.get("amount_usd"))
+        if amount is not None:
+            # Request dollars only. The fee is a separate total.
+            result["new_principal"] += amount
+            result["new_fee"] += AUTO_REFUND_FEE
+        # Past minutes on rows moving onto auto. Rows leaving auto add none.
+        result["new_minutes"] += _review_minutes(row)
+    return result
+
+
+def _empty_channel_success() -> dict[str, int | Decimal]:
+    return {
+        "new_count": 0,
+        "dropped_count": 0,
+        "still_count": 0,
+        "policy_auto_count": 0,
+        "new_principal": Decimal("0"),
+        "new_fee": Decimal("0"),
+        "new_minutes": Decimal("0"),
+        "harm_note_count": 0,
+        "blank_outcome_notes": 0,
+        "outcome_note_rows": 0,
+    }
+
+
 def _matches_by_id(matches) -> dict[str, dict]:
     by_id = {}
     for row in matches:
@@ -376,15 +498,45 @@ def _match_dollars(request_ids, matches_by_id) -> Decimal:
     return dollars
 
 
-def approvals_csv(matches) -> str:
-    """CSV of auto-approved preview rows. Does not write a file."""
+def history_evaluation_csv(history_rows, matches) -> str:
+    """History-shaped CSV of every row. Does not write a file.
+
+    Columns follow ``data/raw/history.csv``. On a row this policy would
+    auto-approve, the last five columns are ``approved``, ``auto``, a blank
+    outcome note, the recorded ``decided_at`` (or ``requested_at`` when that
+    time is missing), and a blank ``review_minutes``. Every other row leaves
+    those five cells blank. This does not change the source CSV and does not
+    treat the download as a refund.
+    """
+    auto_ids = set(_matches_by_id(matches))
     buffer = io.StringIO()
-    fields = ["request_id", "amount_usd", "why", "past_decided_by", "response_days"]
-    writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+    writer = csv.DictWriter(buffer, fieldnames=HISTORY_COLUMNS, extrasaction="ignore")
     writer.writeheader()
-    for row in matches:
-        writer.writerow({field: row.get(field, "") for field in fields})
+    for row in history_rows:
+        request_id = row.get("request_id")
+        key = request_id.strip() if isinstance(request_id, str) else ""
+        exported = {}
+        for field in HISTORY_COLUMNS:
+            if field in _DOWNLOAD_VALUE_COLUMNS:
+                exported[field] = ""
+            else:
+                value = row.get(field, "")
+                exported[field] = "" if value is None else str(value)
+        if key in auto_ids:
+            exported["decision"] = "approved"
+            exported["decided_by"] = "auto"
+            exported["decided_at"] = _recorded_timestamp(row)
+        writer.writerow(exported)
     return buffer.getvalue()
+
+
+def _recorded_timestamp(row) -> str:
+    """The row's decision time, or the request time when no decision time is stored."""
+    for field in ("decided_at", "requested_at"):
+        value = row.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _intake_rows(policy, request_rows) -> list[tuple[Mapping, dict]]:
@@ -426,6 +578,52 @@ def _intake_rows(policy, request_rows) -> list[tuple[Mapping, dict]]:
 def _was_auto(row: Mapping) -> bool:
     value = row.get("decided_by")
     return isinstance(value, str) and value.strip().casefold() == "auto"
+
+
+def _outcome_note_blank(row: Mapping) -> bool:
+    """True when ``outcome_note`` is missing or whitespace-only."""
+    note = row.get("outcome_note")
+    return not isinstance(note, str) or not note.strip()
+
+
+def _note_mentions_harm(row: Mapping) -> bool:
+    """True when the outcome note mentions a chargeback or an appeal."""
+    note = row.get("outcome_note")
+    if not isinstance(note, str):
+        return False
+    folded = note.casefold()
+    return "chargeback" in folded or "appeal" in folded
+
+
+def _review_minutes(row: Mapping) -> Decimal:
+    """Reviewer minutes as Decimal, or zero when blank or unparseable."""
+    value = row.get("review_minutes")
+    if value is None or isinstance(value, bool):
+        return Decimal("0")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return Decimal("0")
+        try:
+            minutes = Decimal(text)
+        except InvalidOperation:
+            return Decimal("0")
+    elif isinstance(value, Decimal):
+        minutes = value
+    elif isinstance(value, Integral):
+        minutes = Decimal(int(value))
+    elif isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return Decimal("0")
+        try:
+            minutes = Decimal(str(value))
+        except InvalidOperation:
+            return Decimal("0")
+    else:
+        return Decimal("0")
+    if not minutes.is_finite():
+        return Decimal("0")
+    return minutes
 
 
 def _parse_moment(value):

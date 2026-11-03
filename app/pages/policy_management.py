@@ -23,8 +23,9 @@ from utils.data.dataloader import load_rows
 from utils.policy import policy_agent
 
 from utils.policy.live_policy import (
-    approvals_csv,
+    history_evaluation_csv,
     auto_approval_split,
+    channel_success,
     historical_auto_approvals,
     history_outcome_rates,
     list_policy_files,
@@ -247,6 +248,12 @@ def _percent_label(value: float | None) -> str:
     return f"{value:.1f}%"
 
 
+def _money_label(value) -> str:
+    if value is None:
+        return "—"
+    return f"${Decimal(value):,.2f}"
+
+
 def _request_change_label(value: int) -> str:
     """Request-count change with no leading plus."""
     noun = "request" if abs(value) == 1 else "requests"
@@ -261,12 +268,6 @@ def _money_change_label(value) -> str:
     if amount < 0:
         return f"-${abs(amount):,.2f}"
     return f"${amount:,.2f}"
-
-
-def _money_label(value) -> str:
-    if value is None:
-        return "—"
-    return f"${Decimal(value):,.2f}"
 
 
 def _percent_change_label(selected, other) -> str:
@@ -284,13 +285,67 @@ def _outcome_rates(policy, history_rows):
     return history_outcome_rates(policy, history_rows)
 
 
-def _render_download(matches, file_name: str) -> None:
-    if not matches:
+def _cards(items) -> None:
+    """One row of bordered metrics. Every item in the row includes a delta, or none do."""
+    columns = st.columns(len(items))
+    for column, (label, value, delta) in zip(columns, items):
+        column.metric(
+            label,
+            value,
+            delta,
+            delta_color="off",
+            border=True,
+            height="stretch",
+        )
+
+
+def _render_comparison(selected_rates, other_rates) -> None:
+    """Short change cards. Shown only when Compare with is set.
+
+    The cards above stay the selected file against the old auto channel.
+    A higher number is not colored as better.
+    """
+    if selected_rates is None or other_rates is None:
+        return
+    approved_change = selected_rates["auto_approved"] - other_rates["auto_approved"]
+    dollar_change = (
+        selected_rates["auto_refund_dollars"] - other_rates["auto_refund_dollars"]
+    )
+    fee_change = selected_rates["fee_dollars"] - other_rates["fee_dollars"]
+    _cards([
+        (
+            "Auto-approve change",
+            _request_change_label(approved_change),
+            _percent_change_label(
+                selected_rates["auto_approved"], other_rates["auto_approved"]
+            ),
+        ),
+        (
+            "Refund dollar change",
+            _money_change_label(dollar_change),
+            _percent_change_label(
+                selected_rates["auto_refund_dollars"],
+                other_rates["auto_refund_dollars"],
+            ),
+        ),
+        (
+            "Fee in that change",
+            _money_change_label(fee_change),
+            _percent_change_label(
+                selected_rates["fee_dollars"], other_rates["fee_dollars"]
+            ),
+        ),
+    ])
+
+
+def _render_download(history_rows, matches, file_name: str) -> None:
+    """Every history row. Auto-approvals are marked approved by auto; other rows leave the last five columns blank."""
+    if not history_rows:
         return
     st.download_button(
-        "Download",
-        data=approvals_csv(matches),
-        file_name=f"{Path(file_name).stem}-auto-approved.csv",
+        "Download data",
+        data=history_evaluation_csv(history_rows, matches),
+        file_name=f"{Path(file_name).stem}-history.csv",
         mime="text/csv",
         key=f"download-{file_name}",
     )
@@ -299,81 +354,76 @@ def _render_download(matches, file_name: str) -> None:
 def _render_policy_side(
     title, policy, matches, history_rows, file_name, *, recorded: bool = False
 ) -> None:
-    """One summary line: name, rates, row count, and the download."""
+    """File name, three figures, and the download."""
     rates = _outcome_rates(policy, history_rows)
-    parts = [f"**{title}**"]
+    st.markdown(_markdown_safe(f"**{title}**"))
+    items = []
     if rates is not None:
-        parts.append(f"Auto-approved {_percent_label(rates['percent_auto_approved'])}")
-        parts.append(
-            f"Auto-refund dollars {_money_label(rates['auto_refund_dollars'])}"
-        )
+        items.append(("Auto-approved", _percent_label(rates["percent_auto_approved"]), None))
+        items.append(("Refund dollars", _money_label(rates["auto_refund_dollars"]), None))
     if history_rows is not None:
-        count = len(matches)
-        noun = "row" if count == 1 else "rows"
-        verb = "were auto-approved" if recorded else "would auto-approve"
-        parts.append(f"{count} history {noun} {verb}.")
-    line_col, download_col = st.columns([5, 1], vertical_alignment="center")
-    line_col.markdown(_markdown_safe(" · ".join(parts)))
-    if file_name and matches:
-        with download_col:
-            _render_download(matches, file_name)
+        items.append(("History rows", str(len(matches)), None))
+    if items:
+        _cards(items)
+    if file_name and history_rows:
+        _render_download(history_rows, matches, file_name)
 
 
-def _render_comparison(selected_rates, other_rates) -> None:
-    """Percent change beside each change. The fee is noted under the dollar change."""
-    if selected_rates is None or other_rates is None:
-        return
-    approved_change = selected_rates["auto_approved"] - other_rates["auto_approved"]
-    dollar_change = (
-        selected_rates["auto_refund_dollars"] - other_rates["auto_refund_dollars"]
-    )
-    fee_change = selected_rates["fee_dollars"] - other_rates["fee_dollars"]
-    percent_col, change_col = st.columns(2)
-    percent_col.metric(
-        "Auto-approved percent change",
-        _percent_change_label(
-            selected_rates["auto_approved"], other_rates["auto_approved"]
+def _render_channel_success(policy, history_rows) -> None:
+    """History replay for the selected file, then the old-channel comparison.
+
+    The first row is this file on history: share of rows, refund dollars on
+    every row it would auto-approve (amount plus the $25 fee), and the fee
+    on rows that were not auto before. That fee is not a slice of the refund
+    dollars. The second row is the same file against rows history marked auto.
+
+    Display only. Does not call a model, write the live pointer, or write a CSV.
+    """
+    success = channel_success(policy, history_rows)
+    rates = _outcome_rates(policy, history_rows)
+    st.markdown("**Evaluated on history**")
+    _cards([
+        (
+            "Auto-approved",
+            _percent_label(None if rates is None else rates["percent_auto_approved"]),
+            None,
         ),
-    )
-    change_col.metric("Auto-approved change", _request_change_label(approved_change))
-    percent_col, change_col = st.columns(2)
-    percent_col.metric(
-        "Auto-refund dollar percent change",
-        _percent_change_label(
-            selected_rates["auto_refund_dollars"],
-            other_rates["auto_refund_dollars"],
+        (
+            "Refund dollars",
+            "—" if rates is None else _money_label(rates["auto_refund_dollars"]),
+            None,
         ),
-    )
-    change_col.metric(
-        "Auto-refund dollar change",
-        _money_change_label(dollar_change),
-    )
-    # The fee is $25 per auto refund. Show only its share of this dollar change.
-    _, fee_col = st.columns(2)
-    fee_col.markdown(_markdown_safe(f"{_money_change_label(fee_change)} of this is fees"))
+        ("Fee", _money_label(success["new_fee"]), None),
+    ])
+    st.markdown("**Compared with auto approved requests from history data**")
+    _cards([
+        ("Newly auto-approved", str(success["new_count"]), None),
+        ("Leaving auto", str(success["dropped_count"]), None),
+        ("Still on auto", str(success["still_count"]), None),
+    ])
 
 
 def _render_auto_split(selected_matches, other_matches) -> None:
-    """The net change split into new auto-approvals, ones that leave, and ones that stay."""
+    """Selected file versus the compared file. Dollars include the $25 fee."""
     split = auto_approval_split(selected_matches, other_matches)
-    new_col, dropped_col, still_col = st.columns(3)
-    _split_figure(new_col, "Newly auto-approved", split["new_count"], split["new_dollars"])
-    _split_figure(
-        dropped_col,
-        "No longer auto-approved",
-        split["dropped_count"],
-        split["dropped_dollars"],
-    )
-    _split_figure(
-        still_col, "Still auto-approved", split["still_count"], split["still_dollars"]
-    )
-
-
-def _split_figure(column, title: str, count, dollars) -> None:
-    noun = "request" if count == 1 else "requests"
-    column.markdown(
-        _markdown_safe(f"**{title}** · {count} {noun} · {_money_label(dollars)}")
-    )
+    _cards([
+        (
+            "Only the selected file",
+            _money_label(split["new_dollars"]),
+            _request_change_label(split["new_count"]),
+        ),
+        (
+            "Only the compared file",
+            _money_label(split["dropped_dollars"]),
+            _request_change_label(split["dropped_count"]),
+        ),
+        (
+            "In both files",
+            _money_label(split["still_dollars"]),
+            _request_change_label(split["still_count"]),
+        ),
+    ])
+    st.caption("These dollars include the $25 fee. The cards above do not.")
 
 
 _NO_COMPARE = "__no_compare__"
@@ -466,13 +516,24 @@ def _render_policy_picker() -> None:
     if other_error:
         st.error(other_error)
 
+    # Shown for the selected file even when Compare with is "Don't compare".
+    if candidate is not None and history_rows is not None:
+        _render_channel_success(candidate, history_rows)
+        if selected and history_rows:
+            _render_download(history_rows, candidate_matches, selected)
+
     if comparing:
         _render_comparison(
             _outcome_rates(candidate, history_rows),
             _outcome_rates(other_policy, history_rows),
         )
-        if candidate is not None and history_rows is not None and (
-            other_recorded or other_policy is not None
+        # A second policy file still gets the three-way split. Without policy
+        # is the old channel, already shown in the success lines.
+        if (
+            compare_with != _WITHOUT_POLICY
+            and candidate is not None
+            and other_policy is not None
+            and history_rows is not None
         ):
             _render_auto_split(candidate_matches, other_matches)
         _render_policy_side(
@@ -483,13 +544,6 @@ def _render_policy_picker() -> None:
             "history-auto" if other_recorded else f"compare-{compare_with}",
             recorded=other_recorded,
         )
-    _render_policy_side(
-        selected or "Selected",
-        candidate,
-        candidate_matches,
-        history_rows,
-        selected or "",
-    )
 
 
 def _render_policy_builder() -> None:

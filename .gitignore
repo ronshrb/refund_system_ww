@@ -7,3 +7,6 @@ __pycache__/
 
 # Graphify knowledge graph (generated locally)
 graphify-out/
+
+# Live review-agent eval workbook (generated)
+eval-results/
