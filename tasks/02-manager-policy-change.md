@@ -9,8 +9,8 @@ Business outcome: Let a Refund Operations Manager (1) **pick the current/live po
 
 **Clause:** Part 2 manager — Refund Operations Manager changes policy without an engineer and previews effect before live; live/current policy selection ties to the reviewer / intake path.  
 **Owner (this section):** project-product-manager  
-**Implementation authorization:** **not granted** by this requirements update. Requirements-only complete → wait for user to authorize engineer implementation.  
-**Status of this UI slice:** requirements captured; acceptance checks below remain **unchecked** until implemented and evidenced.
+**Implementation authorization:** **granted 2026-11-03** by the user (“start implementing this”), with the defaults below confirmed.  
+**Status of this UI slice:** implemented 2026-11-03 for the two tabs, live pointer, history preview, and Reviews label. Task overall remains `in-progress`. Reviews is still only a pointer label.
 
 ### Product intent
 
@@ -60,40 +60,55 @@ The hard part remains the line and an explicit manager go-live, not the agent. C
 - No LLM paraphrase of explanations **unless** the lead/user chooses that open question; default recommendation is **deterministic plain-language templates** from matched rule + conditions (safer, offline, assignment-aligned).
 - Do not expand Reviews queue in this slice beyond consuming the live pointer once it exists.
 
-### Acceptance checks — Policy Management two-tab UI slice (unchecked until evidenced)
+### Acceptance checks — Policy Management two-tab UI slice (evidenced 2026-11-03)
 
-- [ ] Policy Management page exposes **exactly two tabs**: **Policy Picker** | **Policy Builder**.
-- [ ] **Policy Picker:** manager can select the **current/live policy** used by the refund reviewer agent / deterministic evaluate (intake auto) path.
-- [ ] **Policy Picker:** under the selected (or candidate-to-pick) policy, manager can preview which processed **history** rows would **auto-approve**, with **plain-language** explanations of which rule matched and why (not raw policy JSON operator keys).
-- [ ] Picker preview uses intake-available fields only via the deterministic evaluator; historical `decision` / `decided_by` (and other post-decision fields) are not used as eligibility labels; if shown, they are descriptive/warning only.
-- [ ] **Policy Builder** tab retains the existing chatbot draft → validate → preview → Save-draft flow; saving a draft does **not** activate or change the live pointer.
-- [ ] Any go-live / pick that changes current policy requires **explicit manager confirm** in the UI; the LLM has **no** activate/live-pointer tool and cannot authorize refunds.
-- [ ] Source CSVs are not rewritten by picker or builder flows.
-- [ ] No auth, cloud deploy, or real payment calls in this slice.
-- [ ] Focused tests and/or recorded demo evidence cover live-pointer update only on confirm, picker history preview plain-language output, and builder save-without-activate (to be filled when implemented).
+- [x] Policy Management page exposes **exactly two tabs**: **Policy Picker** | **Policy Builder**.
+- [x] **Policy Picker:** manager can select the **current/live policy** used by the refund reviewer agent / deterministic evaluate (intake auto) path.
+- [x] **Policy Picker:** under the selected (or candidate-to-pick) policy, manager can preview which processed **history** rows would **auto-approve**, with **plain-language** explanations of which rule matched and why (not raw policy JSON operator keys).
+- [x] Picker preview uses intake-available fields only via the deterministic evaluator; historical `decision` / `decided_by` (and other post-decision fields) are not used as eligibility labels; if shown, they are descriptive/warning only.
+- [x] **Policy Builder** tab retains the existing chatbot draft → validate → preview → Save-draft flow; saving a draft does **not** activate or change the live pointer.
+- [x] Any go-live / pick that changes current policy requires **explicit manager confirm** in the UI; the LLM has **no** activate/live-pointer tool and cannot authorize refunds.
+- [x] Source CSVs are not rewritten by picker or builder flows.
+- [x] No auth, cloud deploy, or real payment calls in this slice.
+- [x] Focused tests and/or recorded demo evidence cover live-pointer update only on confirm, picker history preview plain-language output, and builder save-without-activate.
 
-### Evidence / results — two-tab UI slice (placeholders)
+### Evidence / results — two-tab UI slice (2026-11-03)
 
-- Implementation authorization: **pending user** (requirements-only as of 2026-11-03).
-- Changed artifacts: _TBD after engineer implementation_
-- Exact commands / test results: _TBD_
-- Demo notes (picker pick + plain-language why; builder save ≠ live): _TBD_
-- Source CSV byte-check or equivalent “unchanged” evidence: _TBD_
+- Implementation authorization: user confirmed the five defaults and said to start implementing this slice.
+- Changed artifacts: `utils/policy/live_policy.py` (new), `tests/test_live_policy.py` (new), `app/pages/policy_management.py` (two tabs; builder UI moved, Save unchanged), `app/pages/reviews.py` (pointer label only).
+- Exact command from the repository root:
 
-### Remaining limitations — two-tab UI slice (until implemented)
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_live_policy tests.test_policy_agent tests.test_policy_preview tests.test_policy_evaluator
+```
 
-- Live/current policy pointer UI and wiring to intake / reviewer path are **not** implemented under this requirements edit.
-- Picker history auto-approve table with plain-language rule explanations is **not** implemented under this edit.
-- Two-tab layout on Policy Management is **not** implemented under this edit.
-- Historical completed slices below (preview utility, conversational builder, Save draft, CoT / `query_history`, etc.) remain valid for their recorded scope; they do **not** satisfy the unchecked picker / go-live acceptance checks above.
+Observed: `Ran 71 tests in 0.127s` — `OK`.
 
-### Open product questions (for Delivery Lead / user)
+- How the pieces stay apart: the Policy Picker selectbox only previews. **Make this the live policy** is the only UI that writes `policies/live_pointer.json` (`{"file": "<name>.json"}`). Save in the Policy Builder still calls `save_policy_draft`, which writes `policies/<name>.json` with `status: draft` and does not touch the pointer. Registered tools remain `build_policy` and `query_history`. No activate tool was added.
+- Fail closed: no pointer, an unreadable pointer, a pointer at a missing or invalid file, or a live policy whose `allow` list is empty makes `evaluate_live` return `decision: review`, `reason: no_live_policy`, `approved_amount: None`. The picker live column then says every request would go to review. It does not invent a policy.
+- Plain language is `explain_rule`: one deterministic sentence per matched rule id, looked up in the policy. Unknown operators become "an extra condition" and the operator key is not printed.
+- Browser (local Streamlit already on `http://localhost:8501`, file watcher picked up the edit): Reviews first showed "No live policy. Every request goes to review." Policy Management showed tabs **Policy Picker** and **Policy Builder**. With `auto-approve.example.json` selected, the candidate side showed 10 history rows and a Why cell starting "Changed mind, delivered at least 0 days ago, delivered within 14 days, amount over $0, amount $49 or less…". Switching the selectbox to `policy.template.json` changed the candidate to 0 rows and did not add the pointer-file line. Clicking **Make this the live policy** wrote `policies/live_pointer.json` as `{"file": "policy.template.json"}`. The template file stayed `status: draft` with an empty allow list. The live column said every request would go to review and named that pointer file. Reviews then showed "Live policy: policy.template.json" and the queue placeholder was unchanged. Policy Builder showed the existing chat box ("Describe a policy change…") and did not show Save, because this session had no proposed draft.
+- The verification click's pointer was removed afterward so the running app is back on the no-live default. A reload of Reviews showed "No live policy. Every request goes to review." again. `policies/live_pointer.json` is absent.
+- Policy file SHA256 unchanged by that click: `auto-approve.example.json` `524AA209C633886032AD65C5232BD74A52376E1C359137BE44C1B66231D4D17F`; `policy.template.json` `BB4967F12ED6D0E5FBFEE2D9E622E654796AF0981922784951A0F161A4B48DDD`; `test1.json` `172D127FE0CE1C0D20B9EE75D96CACB8A2B7A902938A55DC47D5DF0513E1B3F3`.
+- `data/raw/history.csv` SHA256 before and after the unittest: `908EF39A0BF690781B0B034B53ABD6C1EACF5DFD740AE8B1D17EAFF20E5DD5B5`. `data/raw/pending.csv` and `data/raw/policy_notes.csv` could not be hashed; Windows reported each file in use by another process. This slice does not open those CSVs for write. `data/raw/data_dictionary.csv` was hashed once after the tests (`662D2653FF67FC71FE2301EBFBF5859FF1721BB09E8B54627C393D4359572234`); a before-hash was not captured.
 
-1. **Pick vs draft-then-activate:** Does choosing a policy in the Picker **immediately** set the live pointer on confirm, or is there a separate “Activate” step after selecting a candidate? (PM recommendation for narrow demo: **select candidate → preview → explicit “Make live” confirm** = one pick action; no second hidden state.)
-2. **Preview scope in Picker:** Is history auto-approve preview available for **any candidate** before pick, or **only** for the currently live policy? (PM recommendation: **candidate-to-pick and live**, so the manager sees blast radius before confirm.)
-3. **Plain-language explanation source:** Deterministic templates from matched rule/conditions vs LLM paraphrase? (PM recommendation: **deterministic templates**; LLM optional later, never required for go-live.)
-4. **Policy inventory:** Which files appear in the Picker — only `policies/*.json` with `status: draft` (and maybe a promoted live copy), or also `policy.template.json` / `auto-approve.example.json`? (PM recommendation: **saved `policies/` files** plus a clearly labeled empty/safe default if no live pointer yet; example/template labeled proposed/non-live if shown at all.)
-5. **Empty live on first boot:** Confirm superseded design still holds: first boot with no allow-rules / no live file ⇒ evaluate routes all to review until manager picks a policy with allow-rules.
+### Remaining limitations — two-tab UI slice
+
+- Task overall stays `in-progress`. This slice does not finish the manager mechanism or the reviewer queue.
+- Reviews is still only a pointer label. No queue, case context, decisions, or aftermath.
+- `evaluate_live` is the intake hook. No intake runner was built, so pending requests are not processed by this slice.
+- A live file with an empty allow list is still a named pointer on Reviews (`Live policy:` plus the file name). The picker and `evaluate_live` treat that file as no auto-approve path.
+- Browser did not send a builder chat message (a model is configured in this environment) and did not click Save, because no proposed draft was in the session. Save-without-activate is the existing `save_policy_draft` path, covered by `tests.test_policy_agent`, not a new browser click.
+- `pending.csv` and `policy_notes.csv` byte identity was not rechecked in this run because those files were locked.
+- History replay is a preview of past rows, not proof the next case is safe. Historical `decision` is not an eligibility label.
+
+### Open product questions — answered 2026-11-03
+
+1. **Pick flow:** select → preview → explicit **Make live** confirm. Selecting a file does not change the pointer.
+2. **Preview scope:** compare the candidate and the current live policy. If nothing is live, say every request would go to review.
+3. **Plain language:** deterministic templates from the matched rule. No LLM paraphrase.
+4. **Picker list:** JSON files under `policies/`, except the live-pointer file. Show each file’s status. Empty live is the safe default, not a file in the list.
+5. **First boot:** no live pointer, or a live policy with no allow-rules, means every request goes to review until the manager picks a policy.
 
 ### Recommended next handoff
 
@@ -114,7 +129,7 @@ Requirements-only complete for the two-tab Policy Management product slice. **Do
 
 **Revise note (non-blocking, keep in brief):** “Refund reviewer agent follows the live policy” means the **same live pointer** as deterministic `evaluate` / intake auto — **not** that an LLM authorizes refunds or sets `decided_by=auto`. Task 03 comments stay advisory.
 
-**Lead decision:** **Accept** this product section as the authorized requirements baseline for the two-tab Policy Management UI. Status remains `in-progress`. Implementation remains **unauthorized** until the user answers (or accepts PM defaults for) open questions and explicitly asks to build.
+**Lead decision:** **Accept** this product section. On 2026-11-03 the user confirmed the five defaults and asked to start implementation. Engineer handoff is authorized for this slice only.
 
 ---
 
