@@ -33,6 +33,16 @@ Evidence command (from repo root):
 
 Observed 2026-11-03: `Ran 9 tests ... OK`.
 
+## Approved slice: one clear ask + threshold pick-list — 2026-11-03
+
+Owner: project-engineer  
+Status: **done for this clarification UX slice**; task overall remains `in-progress`
+
+- Prompt: one clear ask for vague amount/tenure/delivery thresholds; presets listed; never invent (including not assuming 12 months); UI marker `[[clarify:...]]`.
+- Streamlit: when the latest assistant reply includes a clarify marker, show preset buttons + custom number input; choice is sent as a confirmed user message and runs another agent turn. Markers are stripped from displayed assistant text.
+- Fix (2026-11-03): build_policy failed in a loop because invalid drafts returned only "does not match the supported policy schema". `policy_schema_errors` in the evaluator now names the broken rule/condition and the fix (e.g. one rule per stated_reason); `validate_policy` keeps identical valid/invalid results. Prompt gained rule-writing guidance, one question per reply, no re-asking stated numbers, and a warning when a dropped qualifier widens a rule. Tool-round cap 4 → 6. Tests: 71 pass.
+- Fix (2026-11-03): a picked threshold is recorded in session state and its Quick pick never reappears, even if the model repeats the marker. Prompt now forbids markers when not asking, and requires plain business language (no JSON, field names, rule structure, or safety-check lists in replies).
+
 ## Completed slice: Streamlit UI shell (Part 2 reviewer + manager shell only) — 2026-11-02
 
 Owner: project-engineer  

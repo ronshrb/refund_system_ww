@@ -7,6 +7,7 @@ from pathlib import Path
 
 from utils.data.dataloader import load_rows
 from utils.policy.policy_evaluator import evaluate as _evaluate
+from utils.policy.policy_evaluator import policy_schema_errors, validate_policy
 
 POLICY_FIXTURES = Path(__file__).parent / "fixtures" / "policies"
 PENDING_CSV = Path(__file__).resolve().parent.parent / "data" / "raw" / "pending.csv"
@@ -47,6 +48,29 @@ def eligible_request(**overrides):
     }
     request.update(overrides)
     return request
+
+
+class PolicySchemaErrorTests(unittest.TestCase):
+    def test_valid_policy_has_no_errors(self):
+        policy = make_policy({"stated_reason": "changed_mind", "days_since_delivery_lte": 14})
+        self.assertEqual(policy_schema_errors(policy), [])
+        self.assertTrue(validate_policy(policy))
+
+    def test_reason_list_names_the_condition_and_one_rule_per_reason_fix(self):
+        policy = make_policy({"stated_reason": ["wrong_item", "arrived_damaged"]})
+        errors = policy_schema_errors(policy)
+        self.assertFalse(validate_policy(policy))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("allow[0].all_of[0].when.stated_reason", errors[0])
+        self.assertIn("one rule per reason", errors[0])
+
+    def test_unknown_condition_and_duplicate_id_are_named(self):
+        unknown = make_policy({"customer_is_good": True})
+        self.assertIn("'customer_is_good'", policy_schema_errors(unknown)[0])
+
+        duplicate = make_policy({"fraud_flag": "no"})
+        duplicate["allow"].append(dict(duplicate["allow"][0]))
+        self.assertIn("duplicated", policy_schema_errors(duplicate)[0])
 
 
 class PolicyEvaluatorTests(unittest.TestCase):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import unittest
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from utils.policy import policy_agent
@@ -85,7 +86,8 @@ class PolicyAgentHostTests(unittest.TestCase):
         system = policy_agent.build_system_message(_template_draft())
         collapsed = " ".join(system.split())
         self.assertIn("Ask focused clarifying questions", collapsed)
-        self.assertIn("Do not invent an unconfirmed threshold", collapsed)
+        self.assertIn("one clear ask", collapsed)
+        self.assertIn("[[clarify:tenure_months_gte]]", collapsed)
         self.assertIn("good customers", collapsed)
         self.assertIn("small stuff", collapsed)
         self.assertIn("Never silently invent numeric values", collapsed)
@@ -93,6 +95,7 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertIn("Data dictionary", collapsed)
         self.assertIn("tenure_months", collapsed)
         self.assertIn("query_history", collapsed)
+        self.assertNotIn("Do not invent an unconfirmed threshold", collapsed)
 
     def test_session_draft_updates_only_on_proposed(self):
         original = _template_draft()
@@ -257,6 +260,60 @@ class PolicyAgentHostTests(unittest.TestCase):
             create_kwargs["tools"][0]["function"]["name"], "build_policy"
         )
         self.assertEqual(len(create_kwargs["tools"]), 2)
+
+    def test_streamed_turn_forwards_text_and_joins_split_tool_calls(self):
+        current = _template_draft()
+        candidate = deepcopy(current)
+        candidate["comment"] = "streamed candidate"
+        arguments = json.dumps({"candidate_policy": candidate})
+
+        def chunk(content=None, tool_calls=None):
+            delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+            return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+        def fragment(call_id=None, name=None, args=None):
+            return SimpleNamespace(
+                index=0,
+                id=call_id,
+                function=SimpleNamespace(name=name, arguments=args),
+            )
+
+        first_round = [
+            chunk(content="Checking "),
+            chunk(content="the numbers."),
+            chunk(tool_calls=[fragment("call_1", "build_policy", arguments[:10])]),
+            chunk(tool_calls=[fragment(args=arguments[10:])]),
+            SimpleNamespace(choices=[]),
+        ]
+        second_round = [chunk(content="Draft "), chunk(content="ready.")]
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            iter(first_round),
+            iter(second_round),
+        ]
+        deltas: list[str] = []
+
+        with patch.object(
+            policy_agent,
+            "execute_registered_tool",
+            return_value=_proposed_result(candidate),
+        ) as execute:
+            turn = policy_agent.run_policy_agent_turn(
+                user_text="stream it",
+                history=[],
+                current_draft=current,
+                client=client,
+                on_text_delta=deltas.append,
+            )
+
+        self.assertEqual(execute.call_args.args[0], "build_policy")
+        self.assertEqual(json.loads(execute.call_args.args[1]), json.loads(arguments))
+        self.assertTrue(client.chat.completions.create.call_args.kwargs["stream"])
+        self.assertEqual(
+            turn["assistant_text"], "Checking the numbers.\n\nDraft ready."
+        )
+        self.assertEqual("".join(deltas).strip(), turn["assistant_text"])
+        self.assertEqual(turn["draft"]["comment"], "streamed candidate")
 
     def test_mocked_cannot_express_preserves_draft_in_turn(self):
         current = _template_draft()

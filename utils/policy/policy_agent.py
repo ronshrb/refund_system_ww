@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from utils.policy.policy_agent_utils import (
     BUILD_POLICY_TOOL_NAME,
@@ -19,6 +19,7 @@ from utils.policy.policy_agent_utils import (
     assert_messages_safe_for_provider,
     assistant_text_from_tool_results,
     build_policy_tool_schema,
+    collect_streamed_message,
     conversation_messages_for_provider,
     ensure_session_defaults,
     execute_build_policy_arguments,
@@ -76,28 +77,64 @@ nonempty when object. Supported when conditions only:
 - request_id_not_already_paid: true
 Do not invent fields, operators, rails, reject actions, or partial refunds.
 
-Light chain of thought (keep short):
-- Before asking a clarifying question or calling a tool, think briefly in 3-6
-  short bullets: manager intent, open ambiguities, data limitations, candidate conditions, and
-  edge cases worth checking.
-- Put that scratch reasoning in the assistant reply when helpful, then ask
-  questions or call tools. Do not write long essays.
+How to write rules (the validator rejects anything else):
+- Keep "version" from the current draft and set "status" to exactly "draft".
+- Conditions inside one "when" are AND. Separate rules are OR.
+- stated_reason takes exactly one string, never a list. For several reasons
+  (for example our mistakes), write one rule per reason.
+- Each rule id is unique, short, and snake_case.
+- Example: {"id": "changed_mind_14d", "action": "approve_full", "all_of":
+  [{"when": {"stated_reason": "changed_mind", "days_since_delivery_lte": 14}}]}
+- Manager words to reasons: wrong item or picking error -> wrong_item;
+  damaged -> arrived_damaged; lost or not delivered -> never_arrived. If a
+  phrase has no matching reason, say so instead of picking a close one.
+
+How you talk to the manager:
+- The manager is not technical. Use plain business language only.
+- Never show policy JSON, rule ids, field names (such as amount_usd_lte or
+  stated_reason), operators, "all_of", or a "policy structure" breakdown. The
+  page already shows the draft separately.
+- Do not list the safety checks (fraud, notes, customer id, already paid) as
+  rule conditions; just say standard safety checks still apply.
+- Do not announce that you are about to build the draft. If everything is
+  clear, call build_policy in the same reply, then summarize the result.
+
+Light chain of thought (keep short, plain language):
+- Before asking a question or calling a tool, open with at most 3 short
+  bullets: what you understood, what is still unclear, and one edge case
+  worth checking. No technical terms.
 
 Clarification before build_policy:
 - Ask focused clarifying questions when intent, fields, operators, or numeric
   thresholds are ambiguous.
-- Ask in business terms when intent or numeric thresholds are ambiguous.
-  The manager may not know schema field names; do not ask them to pick
-  columns or operators. Propose a plain-language mapping to a supported
-  condition and confirm it.
-- For vague phrases such as "good customers" or "small stuff", ask what the
-  manager means and guide them toward supported fields and concrete values
-  (for example tenure_months_gte or an amount_usd range). Do not invent an
-  unconfirmed threshold.
+- Ask in business terms. The manager may not know schema field names; do not
+  ask them to pick columns or operators. Propose a plain-language mapping to a
+  supported condition and confirm it.
+- Ask at most one question per reply.
+- For vague phrases such as "good customers", "old customers", or "small
+  stuff", do **one clear ask** for the missing numeric threshold in that turn.
+  Do not invent, suggest, or recommend a number outside the presets (never
+  "should it be 12 months?").
+- Numbers the manager already stated (for example "within 14 days") are
+  confirmed. Do not ask about them again.
+- If the manager drops a qualifier from a rule, say plainly what the rule now
+  covers (for example "every refund of $30 or less, for any reason") and ask
+  once whether that wider rule is intended before building it.
+- Offer presets in the question and mention the on-screen pick list:
+  - amount ("small stuff"): $25, $30, $50, or custom
+  - tenure ("good"/"old" customers): 6, 12, or 24 months, or custom
+  - delivery window when needed: 7, 14, or 30 days, or custom
+- If the manager's reply is still vague, ask **once more** with the same
+  presets only; do not silently fill a value.
 - Never silently invent numeric values. For every numeric value not explicitly
-  stated by the manager, state the exact value and rationale, label it
-  unverified, and ask the manager to confirm or correct it before submitting a
-  candidate that uses it.
+  stated or pick-list-confirmed by the manager, do not put it in a candidate.
+- When your reply asks for one of those thresholds and the manager has not yet
+  answered it, end the message with exactly one marker line (hidden UI hint):
+  [[clarify:amount_usd_lte]] or [[clarify:tenure_months_gte]] or
+  [[clarify:days_since_delivery_lte]]
+  Use at most one marker per reply. Never add a marker when you are not
+  asking a question, when the value is already confirmed, or when the manager
+  dropped that requirement.
 
 Tools:
 - `query_history`: optional filters against the local synthetic history sample.
@@ -109,8 +146,9 @@ Tools:
   assumptions and cannot_express. The host injects current_draft. For a clearly
   stated but unsupported requirement, put an explanation in cannot_express.
   Do not call build_policy while required answers remain unclear.
-- If build_policy returns invalid/error, explain the errors and either ask the
-  manager or call build_policy again with a corrected candidate.
+- If build_policy returns invalid/error, read the error, fix exactly what it
+  names, and call build_policy again without narrating the failure to the
+  manager. Only explain if it still fails.
 
 After a tool result:
 - status "proposed" means the local host may adopt the returned draft; summarize
@@ -141,7 +179,8 @@ def run_policy_agent_turn(
     current_draft: Mapping[str, Any],
     client: Any | None = None,
     model: str = "gpt-4o-mini",
-    max_tool_rounds: int = 4,
+    max_tool_rounds: int = 6,
+    on_text_delta: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run one manager turn with OpenAI tool calling.
 
@@ -165,6 +204,10 @@ def run_policy_agent_turn(
         OpenAI model id; default ``"gpt-4o-mini"``.
     max_tool_rounds :
         Cap on model → tool → model loops so it cannot tool-call forever.
+    on_text_delta :
+        Optional callback; when given, replies are streamed and each text
+        chunk is passed to it as it arrives (the page uses this to show text
+        gradually). ``None`` uses a single non-streamed call.
     """
     draft = deepcopy(dict(current_draft))
 
@@ -185,14 +228,28 @@ def run_policy_agent_turn(
     preview_summary: dict[str, Any] | None = None
     draft_updated = False
     assistant_text = ""
+    # Text from every round, so a reply written before a tool call is kept.
+    spoken_parts: list[str] = []
 
     for _ in range(max_tool_rounds): # we limit the number of tool rounds to avoid infinite loops
-        choice = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-        ).choices[0].message
+        if on_text_delta is None:
+            choice = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+            ).choices[0].message
+        else:
+            choice = collect_streamed_message(
+                client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    stream=True,
+                ),
+                on_text_delta,
+            )
 
         tool_calls = list(choice.tool_calls or [])
         assistant_message: dict[str, Any] = {
@@ -212,9 +269,13 @@ def run_policy_agent_turn(
                 for call in tool_calls
             ]
         messages.append(assistant_message)
+        if (choice.content or "").strip():
+            spoken_parts.append(choice.content.strip())
+            if on_text_delta is not None:
+                on_text_delta("\n\n")
 
         if not tool_calls:
-            assistant_text = (choice.content or "").strip()
+            assistant_text = "\n\n".join(spoken_parts)
             break
 
         for call in tool_calls:

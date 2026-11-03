@@ -7,7 +7,7 @@ from pathlib import Path
 
 from utils.data.data_processing import parse_amount
 from utils.data.dataloader import load_rows
-from utils.policy.policy_evaluator import validate_policy
+from utils.policy.policy_evaluator import policy_schema_errors
 from utils.policy.policy_preview import preview_matching_rows
 
 
@@ -72,8 +72,9 @@ def _validate_draft(policy, label):
         return f"{label} must be a policy object."
     if policy.get("status") != "draft":
         return f"{label} status must be exactly 'draft'."
-    if not validate_policy(policy):
-        return f"{label} does not match the supported policy schema."
+    problems = policy_schema_errors(policy)
+    if problems:
+        return f"{label} does not match the supported policy schema: {' '.join(problems)}"
     return None
 
 

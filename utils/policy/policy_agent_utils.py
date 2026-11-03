@@ -13,7 +13,8 @@ from collections import Counter
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping, Sequence
+from types import SimpleNamespace
+from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
 from dotenv import load_dotenv
 
@@ -410,6 +411,46 @@ def tool_result_for_model(result: Mapping[str, Any]) -> dict[str, Any]:
         "errors",
     )
     return {key: result[key] for key in allowed if key in result}
+
+
+def collect_streamed_message(
+    stream: Any, on_text_delta: Callable[[str], None]
+) -> SimpleNamespace:
+    """Consume a streamed chat completion into a non-streamed-shaped message.
+
+    Text deltas are forwarded to ``on_text_delta`` as they arrive. Tool-call
+    fragments arrive split across chunks and are joined by their ``index``.
+    The return value has ``.content`` and ``.tool_calls`` (each with ``.id``,
+    ``.function.name``, ``.function.arguments``) like a non-streamed message.
+    """
+    content_parts: list[str] = []
+    calls: dict[int, dict[str, str]] = {}
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta.content:
+            content_parts.append(delta.content)
+            on_text_delta(delta.content)
+        for fragment in delta.tool_calls or []:
+            call = calls.setdefault(
+                fragment.index, {"id": "", "name": "", "arguments": ""}
+            )
+            if fragment.id:
+                call["id"] = fragment.id
+            if fragment.function and fragment.function.name:
+                call["name"] += fragment.function.name
+            if fragment.function and fragment.function.arguments:
+                call["arguments"] += fragment.function.arguments
+
+    tool_calls = [
+        SimpleNamespace(
+            id=call["id"],
+            function=SimpleNamespace(name=call["name"], arguments=call["arguments"]),
+        )
+        for _, call in sorted(calls.items())
+    ]
+    return SimpleNamespace(content="".join(content_parts), tool_calls=tool_calls)
 
 
 def assistant_text_from_tool_results(

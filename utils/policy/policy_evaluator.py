@@ -73,49 +73,83 @@ def _valid_operand(operator, operand):
 
 def validate_policy(policy):
     """Return whether a policy matches the evaluator's closed schema."""
-    if not isinstance(policy, Mapping) or set(policy) - _POLICY_KEYS:
-        return False
+    return not policy_schema_errors(policy)
+
+
+def policy_schema_errors(policy):
+    """Return readable reasons a policy breaks the closed schema (empty if valid).
+
+    Stops at the first broken rule so messages stay short for the drafting agent.
+    """
+    if not isinstance(policy, Mapping):
+        return ["Policy must be an object."]
+    extra = sorted(set(policy) - _POLICY_KEYS)
+    if extra:
+        return [f"Unknown top-level keys {extra}; allowed: {sorted(_POLICY_KEYS)}."]
     if "version" not in policy or "allow" not in policy:
-        return False
+        return ["Policy needs both 'version' and 'allow'."]
     if _policy_version(policy) is None:
-        return False
+        return ["'version' must be a non-empty string or an integer."]
     if "status" in policy and not isinstance(policy["status"], str):
-        return False
+        return ["'status' must be a string."]
     if "comment" in policy and not isinstance(policy["comment"], str):
-        return False
+        return ["'comment' must be a string."]
     rules = policy["allow"]
     if not isinstance(rules, list):
-        return False
+        return ["'allow' must be a list of rules."]
 
     seen_rule_ids = set()
-    for rule in rules:
+    for index, rule in enumerate(rules):
+        where = f"allow[{index}]"
         if not isinstance(rule, Mapping) or set(rule) != _RULE_KEYS:
-            return False
+            keys = sorted(rule) if isinstance(rule, Mapping) else type(rule).__name__
+            return [f"{where} must have exactly keys {sorted(_RULE_KEYS)}; got {keys}."]
         rule_id = rule["id"]
-        if not isinstance(rule_id, str) or not rule_id.strip() or rule_id in seen_rule_ids:
-            return False
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            return [f"{where}.id must be a non-empty string."]
+        if rule_id in seen_rule_ids:
+            return [f"{where}.id {rule_id!r} is duplicated; rule ids must be unique."]
         seen_rule_ids.add(rule_id)
         if rule["action"] != "approve_full":
-            return False
+            return [f"{where}.action must be 'approve_full'."]
         groups = rule["all_of"]
         if not isinstance(groups, list) or not groups:
-            return False
-        for group in groups:
+            return [f"{where}.all_of must be a non-empty list of groups."]
+        for group_index, group in enumerate(groups):
+            group_where = f"{where}.all_of[{group_index}]"
             if not isinstance(group, Mapping) or "when" not in group:
-                return False
-            if set(group) - _GROUP_KEYS:
-                return False
+                return [f"{group_where} must be an object with a 'when' object."]
+            extra = sorted(set(group) - _GROUP_KEYS)
+            if extra:
+                return [f"{group_where} has unknown keys {extra}; allowed: {sorted(_GROUP_KEYS)}."]
             if "source_note" in group and group["source_note"] is not None and not isinstance(group["source_note"], str):
-                return False
+                return [f"{group_where}.source_note must be a string."]
             if "comment" in group and not isinstance(group["comment"], str):
-                return False
+                return [f"{group_where}.comment must be a string."]
             conditions = group["when"]
             if not isinstance(conditions, Mapping) or not conditions:
-                return False
+                return [f"{group_where}.when must be a non-empty object."]
             for operator, operand in conditions.items():
-                if operator not in _OPERATORS or not _valid_operand(operator, operand):
-                    return False
-    return True
+                if operator not in _OPERATORS:
+                    return [f"{group_where}.when has unsupported condition {operator!r}."]
+                if not _valid_operand(operator, operand):
+                    return [f"{group_where}.when.{operator} has invalid value {operand!r}. {_operand_hint(operator)}"]
+    return []
+
+
+def _operand_hint(operator):
+    if operator == "stated_reason":
+        return (
+            f"Use exactly one of {sorted(REASONS)}; for several reasons, "
+            "write one rule per reason."
+        )
+    if operator in {"days_since_delivery_gte", "days_since_delivery_lte", "tenure_months_gte"}:
+        return "Use a whole number."
+    if operator in {"amount_usd_gt", "amount_usd_lte"}:
+        return "Use a number."
+    if operator == "fraud_flag":
+        return "Only \"no\" is allowed."
+    return "Only true is allowed."
 
 
 def _parse_integer(value):
