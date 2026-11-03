@@ -4,3 +4,6 @@ __pycache__/
 *$py.class
 .policy-drafts/
 .env
+
+# Graphify knowledge graph (generated locally)
+graphify-out/

@@ -1,4 +1,8 @@
 pandas
 streamlit
-openai
 python-dotenv
+langchain
+langgraph
+langchain-openai
+langchain-anthropic
+langchain-google-genai

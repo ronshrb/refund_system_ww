@@ -13,6 +13,12 @@ Report only to Project Delivery Lead. Read `.github/copilot-instructions.md`, `d
 
 If the delegated work would diverge from the assignment, stop, flag it to the lead with the clause it violates, and do not continue that work.
 
+## Navigate with graphify
+
+The repo has a graphify knowledge graph in `graphify-out/` (code, briefs, agents, and the assignment PDF). Before exploring with Read, Grep, or Glob, run `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"`. Read source files directly only to edit or debug specific lines, or when the graph lacks the detail. The graph is a map, not evidence: confirm behavior in the code and tests before you report it.
+
+Before judging a change, run `graphify explain` on each changed function to find everything that depends on it; flag dependents the change did not account for.
+
 ## Review
 
 1. Inspect changed code and the callers that actually control behavior. Check correctness, regressions, trust boundaries, precise money handling, duplicate protection, persistence, policy precedence, and auditability. Treat every approval as moving money.

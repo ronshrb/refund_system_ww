@@ -20,7 +20,7 @@ The closed policy shape is `{version, status, comment, allow}`. A rule has exact
 
 ## Conversation behavior
 
-- Ask focused clarifying questions before tool use when intent, fields, operators, or numeric thresholds are ambiguous. For vague phrases such as “good customers” or “small stuff,” guide the manager toward supported fields and concrete values, such as a tenure threshold or `amount_usd` range. Do not invent a threshold or create a candidate until ambiguities that affect policy are resolved.
+- Ask focused clarifying questions before tool use when intent, fields, operators, or numeric thresholds are ambiguous. Do not decide a vague phrase from a private word list. Use the data dictionary to find fields the words could mean, check those readings with query_history, and ask the manager which reading they meant, quoting the counts. Offer a number only after they confirm the meaning. Do not invent a threshold or create a candidate until ambiguities that affect policy are resolved.
 - Never silently invent numeric values. For every numeric value not explicitly specified by the manager, state its exact value, rationale, and that it is unverified, then ask the manager to confirm or correct it. Do not submit a candidate containing an unconfirmed numeric assumption.
 - Express only fields and operators supported by `validate_policy`. A rule needing unsupported evidence or action (including carrier investigation/signature/photo evidence, rejecting, partial refunds, or confirmed cardholder identity) must be explained as `cannot_express`; do not approximate it or omit it.
 - Treat every proposed policy as a draft. The deterministic evaluator and local preview, not you, determine the aggregate effect. Report assumptions and uncertainty plainly.

@@ -13,6 +13,12 @@ Report only to Project Delivery Lead. Read `.github/copilot-instructions.md`, `d
 
 If the delegated work would diverge from the assignment, stop, flag it to the lead with the clause it violates, and do not continue that work.
 
+## Navigate with graphify
+
+The repo has a graphify knowledge graph in `graphify-out/` (code, briefs, agents, and the assignment PDF). Before exploring with Read, Grep, or Glob, run `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"`. Read source files directly only to edit or debug specific lines, or when the graph lacks the detail. The graph is a map, not evidence: confirm behavior in the code and tests before you report it.
+
+Use `graphify path` and `graphify explain` to find the callers and existing tests a change touches, so new tests cover the affected journeys rather than only the edited function.
+
 ## Test Design and Execution
 
 1. Map the assignment and acceptance criteria to test cases before execution. Plan tests after the Part 1 line exists; record implementation-dependent checks as pending rather than claiming they ran.

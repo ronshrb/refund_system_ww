@@ -5,9 +5,12 @@ import unittest
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from utils.policy import policy_draft_tool as draft_tool
+
+_REAL_HISTORY_EVIDENCE = draft_tool.history_evidence
 
 
 def valid_policy(*, rule_id="custom_rule", amount_limit=Decimal("20.00")):
@@ -26,6 +29,10 @@ def valid_policy(*, rule_id="custom_rule", amount_limit=Decimal("20.00")):
 
 class PolicyDraftToolTests(unittest.TestCase):
     def setUp(self):
+        # History evidence has its own test below; keep these on the pending preview.
+        evidence = patch.object(draft_tool, "history_evidence", return_value=None)
+        evidence.start()
+        self.addCleanup(evidence.stop)
         self.pending_path = draft_tool.PENDING_PATH
         self.rows = [
             {
@@ -84,7 +91,7 @@ class PolicyDraftToolTests(unittest.TestCase):
         ))
 
         self.assertEqual(set(result), {
-            "status", "draft", "assumptions", "preview_summary"
+            "status", "draft", "assumptions", "preview_summary", "history_evidence"
         })
         self.assertEqual(set(result["preview_summary"]), {
             "prior", "candidate", "delta"
@@ -168,6 +175,36 @@ class PolicyDraftToolTests(unittest.TestCase):
         })
         self.assertEqual(second["draft"]["allow"][0]["id"], "second")
         self.assertEqual(preview.call_count, 4)
+
+    def test_history_evidence_matches_on_intake_fields_and_reports_past_decisions(self):
+        history = [
+            {"request_id": "H-1", "amount_usd": "$10.00", "stated_reason": "changed_mind", "decision": "approved"},
+            {"request_id": "H-2", "amount_usd": "$18.00", "stated_reason": "changed_mind", "decision": "rejected"},
+            {"request_id": "H-3", "amount_usd": "$90.00", "stated_reason": "changed_mind", "decision": "approved"},
+        ]
+        seen_rows = []
+
+        def preview(rows, policy_path, *, already_paid_ids):
+            seen_rows.extend(rows)
+            return self.preview_matching_rows(rows, policy_path, already_paid_ids=already_paid_ids)
+
+        policy_path = Path(self.enterContext(TemporaryDirectory())) / "candidate.json"
+        policy_path.write_text(
+            json.dumps(valid_policy(amount_limit=20), default=str), encoding="utf-8"
+        )
+        with patch.object(draft_tool, "load_rows", return_value=history) as load_rows, patch.object(
+            draft_tool, "preview_matching_rows", side_effect=preview
+        ):
+            evidence = _REAL_HISTORY_EVIDENCE(policy_path)
+
+        load_rows.assert_called_once_with(draft_tool.HISTORY_PATH)
+        self.assertEqual(evidence["match_count"], 2)
+        self.assertEqual(evidence["matched_total_usd"], "28.00")
+        self.assertEqual(evidence["past_decisions"], {"approved": 1, "rejected": 1})
+        self.assertEqual(evidence["amount_min_usd"], "10.00")
+        self.assertEqual(evidence["amount_max_usd"], "18.00")
+        self.assertIn("not ground truth", evidence["note"])
+        self.assertNotIn("H-1", json.dumps(evidence))
 
     def test_module_has_no_cli_main(self):
         self.assertFalse(hasattr(draft_tool, "main"))

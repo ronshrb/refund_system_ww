@@ -167,21 +167,79 @@ def _parse_integer(value):
     return None
 
 
-def _evaluate_condition(operator, expected, request, already_paid_ids):
+def compare_policy_field(operator, expected, request):
+    """Return whether one request field matches a policy-shaped comparison.
+
+    This is the only reason, integer, and fraud comparison used by ``evaluate``
+    and ``query_history``. ``True`` or ``False`` when the field can be compared;
+    ``None`` when the value is missing, malformed, below 0, or an unknown fraud
+    token — the same invalid cases as ``evaluate``. Notes, customer id, and
+    already-paid rails are not applied here, and a match is not an approval.
+    """
+    if not isinstance(request, Mapping):
+        return None
+
     if operator == "stated_reason":
         reason = normalize_reason(request.get("stated_reason"))
         if reason is None:
-            return None, "invalid_request"
-        return reason == expected, "condition_not_met"
+            return None
+        # Fold a known alias on the filter too, so "damaged" and
+        # "arrived_damaged" describe the same cohort.
+        folded = normalize_reason(expected)
+        return reason == (folded if folded is not None else expected)
 
     if operator.startswith("days_since_delivery_") or operator == "tenure_months_gte":
-        field = "days_since_delivery" if operator.startswith("days_since_delivery_") else "tenure_months"
+        field = (
+            "days_since_delivery"
+            if operator.startswith("days_since_delivery_")
+            else "tenure_months"
+        )
         value = _parse_integer(request.get(field))
+        # Below zero is invalid for evaluate, so it must not satisfy a filter.
         if value is None or value < 0:
-            return None, "invalid_request"
+            return None
+        bound = _parse_integer(expected)
+        if bound is None:
+            return None
         if operator.endswith("_gte"):
-            return value >= expected, "condition_not_met"
-        return value <= expected, "condition_not_met"
+            return value >= bound
+        return value <= bound
+
+    if operator == "fraud_flag":
+        value = request.get("fraud_flag")
+        if not isinstance(value, str) or not value.strip():
+            return None
+        state = value.strip().casefold()
+        row_clear = state in _FRAUD_CLEAR
+        row_raised = state in _FRAUD_RAISED
+        if not row_clear and not row_raised:
+            return None
+        if not isinstance(expected, str) or not expected.strip():
+            return False
+        # Only the two evaluator token sets. A clear filter such as "no"
+        # matches no/n/false; a raised filter matches yes/y/true.
+        expected_state = expected.strip().casefold()
+        if expected_state in _FRAUD_CLEAR:
+            return row_clear
+        if expected_state in _FRAUD_RAISED:
+            return row_raised
+        return False
+
+    return None
+
+
+def _evaluate_condition(operator, expected, request, already_paid_ids):
+    if (
+        operator == "stated_reason"
+        or operator == "fraud_flag"
+        or operator == "tenure_months_gte"
+        or operator.startswith("days_since_delivery_")
+    ):
+        matched = compare_policy_field(operator, expected, request)
+        if matched is None:
+            failure = "unknown_fraud_state" if operator == "fraud_flag" else "invalid_request"
+            return None, failure
+        return matched, "condition_not_met"
 
     if operator in {"amount_usd_gt", "amount_usd_lte"}:
         value = parse_amount(request.get("amount_usd"))
@@ -191,17 +249,6 @@ def _evaluate_condition(operator, expected, request, already_paid_ids):
         if operator == "amount_usd_gt":
             return value > threshold, "condition_not_met"
         return value <= threshold, "condition_not_met"
-
-    if operator == "fraud_flag":
-        value = request.get("fraud_flag")
-        if not isinstance(value, str) or not value.strip():
-            return None, "unknown_fraud_state"
-        state = value.strip().casefold()
-        if state in _FRAUD_CLEAR:
-            return True, "condition_not_met"
-        if state in _FRAUD_RAISED:
-            return False, "condition_not_met"
-        return None, "unknown_fraud_state"
 
     if operator == "customer_id_present":
         value = request.get("customer_id")

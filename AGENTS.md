@@ -60,3 +60,7 @@ Live briefs are the files under `tasks/`. Do not resurrect old names such as `01
 - A task is done only when its acceptance checks pass with recorded evidence. Separate executed results from estimates, proposed targets, and untested claims.
 - Run focused tests after each meaningful change. Keep reviewer actions, policy versions, and simulated decisions auditable.
 - Preserve user edits. Do not commit, publish, install optional skills, or expand scope without authorization. Use trusted installed skills first; propose any necessary download with its source and reason.
+
+## Navigating the repo
+
+A graphify knowledge graph of the code, briefs, agent files, and assignment PDF lives in `graphify-out/` (`GRAPH_REPORT.md`, `graph.json`, `graph.html`). Start codebase and architecture questions with `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"`, then read the specific files you need. After code changes, run `graphify update .` (code only, no API cost). The graph is a map, not evidence; confirm behavior in code and tests.

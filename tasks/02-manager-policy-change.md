@@ -1,9 +1,122 @@
 # 02 — Manager policy drafting and preview
 
-Owner: project-engineer (implementation); project-product-manager (acceptance)
+Owner: **project-product-manager** (product requirements and acceptance for the Policy Management page); **project-engineer** (implementation of later slices only when the user explicitly authorizes — **this 2026-11-03 requirements edit does not authorize implementation**)
 Status: in-progress
-Dependencies: task 01 closed policy schema and `validate_policy`; existing `utils.policy_preview` API; `data/raw/policy_notes.csv` and `data/raw/data_dictionary.csv` as policy/field context; the local pending-row source for previews; Streamlit conversation/session state and function-tool registration. A model provider call is permitted only when a provider/runtime is configured and data-sharing is approved.
-Business outcome: Let a Refund Operations Manager describe a policy change over conversation turns, resolve vague concepts into schema-supported values, then build, validate, and preview a draft through a deterministic Python function tool. This slice does not approve refunds or activate/version policy.
+Dependencies: task 01 closed policy schema, deterministic `evaluate` / `validate_policy`, and proposed (not activated) example policy; existing `utils.policy_preview` API; saved draft policies under `policies/`; `data/raw/history.csv` for picker preview only (intake-available fields); `data/raw/policy_notes.csv` and `data/raw/data_dictionary.csv` as builder context; local pending cohort for builder draft preview; Streamlit Policy Management page + conversation/session state and `build_policy` / `query_history` tools; intake / reviewer path must consume the same live/current policy pointer once picker go-live exists. A model provider call is permitted only when a provider/runtime is configured and data-sharing is approved. Task 03 reviewer comments remain advisory and must not activate policy or authorize refunds.
+Business outcome: Let a Refund Operations Manager (1) **pick the current/live policy** that the refund reviewer agent and deterministic intake auto path follow, with a plain-language preview of which processed history rows would auto-approve and why; and (2) **draft** policy changes via the Policy Builder chatbot (validate + preview before any go-live). Saving a draft is never activation. Every go-live/pick is an explicit manager action. LLM must not activate policy or authorize refunds.
+
+## Product requirements: two-tab Policy Management page — 2026-11-03
+
+**Clause:** Part 2 manager — Refund Operations Manager changes policy without an engineer and previews effect before live; live/current policy selection ties to the reviewer / intake path.  
+**Owner (this section):** project-product-manager  
+**Implementation authorization:** **not granted** by this requirements update. Requirements-only complete → wait for user to authorize engineer implementation.  
+**Status of this UI slice:** requirements captured; acceptance checks below remain **unchecked** until implemented and evidenced.
+
+### Product intent
+
+Policy Management is one Streamlit page with **exactly two tabs**:
+
+| Tab | Name | Job |
+|---|---|---|
+| 1 | **Policy Picker** | Select the **current/live policy** used by the refund reviewer agent and the deterministic evaluate / auto-approve intake path. Preview which `history.csv` (processed/sample history) rows would auto-approve under the selected or candidate-to-pick policy, with **simple-words** rule explanations (not raw policy JSON operator keys). |
+| 2 | **Policy Builder** | Existing conversational policy-builder chatbot: clarify → `build_policy` → validate → aggregate preview → optional Save draft to `policies/`. Saving a draft ≠ activation. |
+
+The hard part remains the line and an explicit manager go-live, not the agent. Cuts beat a wide half-working picker.
+
+### Hard boundaries (must hold)
+
+- LLM must **not** activate policy, write the live pointer, or authorize refunds.
+- Preview before live; picking / activating is an **explicit manager UI action** (button + confirm), **not** a model tool.
+- Do **not** rewrite source CSVs (`history.csv`, `pending.csv`, policy notes, data dictionary).
+- History `decision` / `decided_by` / post-decision fields are **not** ground-truth eligibility labels. Picker preview shows what the **evaluator** would decide from **intake-available fields only**. If historical decision columns are shown at all, label them descriptive / warning only.
+- No auth, cloud deploy, or real payments.
+- Stay inside the 4–6 hour narrow demo; record cuts (see below).
+
+### Tab 1 — Policy Picker (must-haves)
+
+1. Manager can see available policy files suitable for selection (e.g. saved drafts under `policies/`, plus any documented example/template only if clearly labeled non-live / proposed — product default: pick among **saved** policies the manager already checked).
+2. Manager can **select / pick** which policy is **current/live** for:
+   - deterministic intake `evaluate` / auto path
+   - refund reviewer agent context that must follow the same live policy
+3. Before or as part of confirming a pick, manager can **preview** on processed history rows (`data/raw/history.csv` or the project’s established history load path):
+   - which rows would **auto-approve** under the policy being considered
+   - **why**, in **plain language** (e.g. “Changed mind, delivered within 14 days, amount $49 or less…”) — **not** technical wording like raw JSON keys (`amount_usd_lte`, `days_since_delivery_lte`, operator maps)
+4. Any change that sets or changes the live/current pointer requires an **explicit manager confirm** (e.g. “Make this the live policy”). No silent activation from chat, tools, or page load.
+5. Source history file bytes remain unchanged; preview is read-only evaluation.
+
+### Tab 2 — Policy Builder (must-haves — preserve existing)
+
+1. Keep the existing Policy Builder chatbot journey already specified/implemented in this task: multi-turn clarification, `build_policy`, validate, aggregate preview, Check-then-Save draft to `policies/<name>.json`.
+2. Session draft updates only when `build_policy` returns `status == "proposed"`; Save writes draft status only; **Save ≠ activation**.
+3. Builder must not register or call any activate / live-pointer tool. LLM cannot activate.
+4. Offline/mock path and data-sharing gates remain as already accepted for the conversational slice.
+
+### Explicit cuts (demo timebox)
+
+- No multi-version visual diff beyond picker preview + builder aggregate preview already in scope.
+- No full rollback UX beyond “pick a previous saved policy” if files remain on disk (fancy version history UI deferred).
+- No auth, cloud, payments, or rewriting CSVs.
+- No treating history outcomes as training labels or “correctness” scores in the picker.
+- No LLM paraphrase of explanations **unless** the lead/user chooses that open question; default recommendation is **deterministic plain-language templates** from matched rule + conditions (safer, offline, assignment-aligned).
+- Do not expand Reviews queue in this slice beyond consuming the live pointer once it exists.
+
+### Acceptance checks — Policy Management two-tab UI slice (unchecked until evidenced)
+
+- [ ] Policy Management page exposes **exactly two tabs**: **Policy Picker** | **Policy Builder**.
+- [ ] **Policy Picker:** manager can select the **current/live policy** used by the refund reviewer agent / deterministic evaluate (intake auto) path.
+- [ ] **Policy Picker:** under the selected (or candidate-to-pick) policy, manager can preview which processed **history** rows would **auto-approve**, with **plain-language** explanations of which rule matched and why (not raw policy JSON operator keys).
+- [ ] Picker preview uses intake-available fields only via the deterministic evaluator; historical `decision` / `decided_by` (and other post-decision fields) are not used as eligibility labels; if shown, they are descriptive/warning only.
+- [ ] **Policy Builder** tab retains the existing chatbot draft → validate → preview → Save-draft flow; saving a draft does **not** activate or change the live pointer.
+- [ ] Any go-live / pick that changes current policy requires **explicit manager confirm** in the UI; the LLM has **no** activate/live-pointer tool and cannot authorize refunds.
+- [ ] Source CSVs are not rewritten by picker or builder flows.
+- [ ] No auth, cloud deploy, or real payment calls in this slice.
+- [ ] Focused tests and/or recorded demo evidence cover live-pointer update only on confirm, picker history preview plain-language output, and builder save-without-activate (to be filled when implemented).
+
+### Evidence / results — two-tab UI slice (placeholders)
+
+- Implementation authorization: **pending user** (requirements-only as of 2026-11-03).
+- Changed artifacts: _TBD after engineer implementation_
+- Exact commands / test results: _TBD_
+- Demo notes (picker pick + plain-language why; builder save ≠ live): _TBD_
+- Source CSV byte-check or equivalent “unchanged” evidence: _TBD_
+
+### Remaining limitations — two-tab UI slice (until implemented)
+
+- Live/current policy pointer UI and wiring to intake / reviewer path are **not** implemented under this requirements edit.
+- Picker history auto-approve table with plain-language rule explanations is **not** implemented under this edit.
+- Two-tab layout on Policy Management is **not** implemented under this edit.
+- Historical completed slices below (preview utility, conversational builder, Save draft, CoT / `query_history`, etc.) remain valid for their recorded scope; they do **not** satisfy the unchecked picker / go-live acceptance checks above.
+
+### Open product questions (for Delivery Lead / user)
+
+1. **Pick vs draft-then-activate:** Does choosing a policy in the Picker **immediately** set the live pointer on confirm, or is there a separate “Activate” step after selecting a candidate? (PM recommendation for narrow demo: **select candidate → preview → explicit “Make live” confirm** = one pick action; no second hidden state.)
+2. **Preview scope in Picker:** Is history auto-approve preview available for **any candidate** before pick, or **only** for the currently live policy? (PM recommendation: **candidate-to-pick and live**, so the manager sees blast radius before confirm.)
+3. **Plain-language explanation source:** Deterministic templates from matched rule/conditions vs LLM paraphrase? (PM recommendation: **deterministic templates**; LLM optional later, never required for go-live.)
+4. **Policy inventory:** Which files appear in the Picker — only `policies/*.json` with `status: draft` (and maybe a promoted live copy), or also `policy.template.json` / `auto-approve.example.json`? (PM recommendation: **saved `policies/` files** plus a clearly labeled empty/safe default if no live pointer yet; example/template labeled proposed/non-live if shown at all.)
+5. **Empty live on first boot:** Confirm superseded design still holds: first boot with no allow-rules / no live file ⇒ evaluate routes all to review until manager picks a policy with allow-rules.
+
+### Recommended next handoff
+
+Requirements-only complete for the two-tab Policy Management product slice. **Do not start implementation.** Next: Delivery Lead presents open questions to the user; after answers + **explicit user authorization**, hand off implementation to **project-engineer**, then independent **project-qa**.
+
+### Delivery Lead challenge gate — 2026-11-03
+
+**Clause tested:** Part 2 manager (change without engineer; preview before live) + live policy tied to intake / reviewer path; AI judgment (LLM drafts only; must not activate or authorize refunds).
+
+| Challenge | Assessment |
+|---|---|
+| Evidence vs proposal | Requirements only; no UI evidence yet. Unchecked acceptance + placeholders are correct. Historical builder slices do **not** satisfy picker/go-live. |
+| Credible alternative | Separate numbered brief rejected — same manager page/mechanism. Knob-only settings page rejected earlier in this file; two tabs (pick + builder chat) match assignment journey. |
+| Assumptions | Open Q1–Q5 correctly flagged. PM defaults (confirm “Make live”; candidate+live preview; deterministic plain-language templates; `policies/` inventory; empty live ⇒ all review) are **provisionally accepted as demo baseline** until the user overrides. |
+| Fail-safe | Explicit manager confirm; no LLM activate tool; Save ≠ live; history decisions not eligibility labels; CSVs read-only — aligned with hard limits. |
+| Stop / revise / rollback | Preview before confirm; rollback = pick an earlier saved policy (no fancy version UI). Replay ≠ proof next case is safe — already in limitations. |
+| Smallest understandable cut | Two tabs on existing Policy Management page; cuts listed; no auth/cloud/payments; Reviews queue not expanded beyond consuming live pointer — fits 4–6h when authorized. |
+
+**Revise note (non-blocking, keep in brief):** “Refund reviewer agent follows the live policy” means the **same live pointer** as deterministic `evaluate` / intake auto — **not** that an LLM authorizes refunds or sets `decided_by=auto`. Task 03 comments stay advisory.
+
+**Lead decision:** **Accept** this product section as the authorized requirements baseline for the two-tab Policy Management UI. Status remains `in-progress`. Implementation remains **unauthorized** until the user answers (or accepts PM defaults for) open questions and explicitly asks to build.
+
+---
 
 ## Approved slice: light CoT, data dictionary text, history query tool — 2026-11-03
 
@@ -40,6 +153,11 @@ Status: **done for this clarification UX slice**; task overall remains `in-progr
 
 - Prompt: one clear ask for vague amount/tenure/delivery thresholds; presets listed; never invent (including not assuming 12 months); UI marker `[[clarify:...]]`.
 - Streamlit: when the latest assistant reply includes a clarify marker, show preset buttons + custom number input; choice is sent as a confirmed user message and runs another agent turn. Markers are stripped from displayed assistant text.
+- Ask from the request and the data (2026-11-03, user-requested): (1) `build_policy` now also replays the candidate on `history.csv` (`history_evidence`: match count, amount min/median/max, past decisions, reasons; intake fields only for matching; past decisions labeled not ground truth; failure never blocks a build) and the model receives it. (2) Prompt gained "Deciding what to ask": only what the manager said that is vague, plus what history shows; no added conditions; build right away when nothing is vague or notable. (3) LangGraph `guard` node: if the final reply asks about an amount limit, tenure, or delivery window the manager never raised (marker or preset list vs. manager wording), the reply is removed (`RemoveMessage`), a host note is added, and the model retries once; the page clears the streamed text. Live check (OpenAI): "Change of mind within 14 days. Nothing else." → queried history, built, quoted 11 matches / all approved / $11.86–$49.00, no amount question. Tests: 85 pass.
+- LangChain / LangGraph swap (2026-11-03, user-requested): the agent turn is a LangGraph `StateGraph` (model node → tools node → model, capped by `recursion_limit = 2 × max_tool_rounds + 1`). The tools node runs `build_policy` / `query_history` in local Python and is still the only place the draft changes (only on `proposed`). The model comes from `utils/policy/llm_provider.py` via LangChain `init_chat_model`: `LLM_PROVIDER` = `openai` (default, `gpt-4o-mini`, `OPENAI_API_KEY`), `anthropic` (`claude-haiku-4-5`, `ANTHROPIC_API_KEY`), or `gemini` (`gemini-2.5-flash`, `GOOGLE_API_KEY`); `LLM_MODEL` overrides the default; `api_key` can be passed in (for a later UI key step). Temperature 0. The `build_policy` tool schema now spells out the closed policy shape (Gemini rejects free-form objects); the validator is still the authority. Page-owned steps (blockers, confirm, name, save) unchanged. Removed the OpenAI-only client code and `collect_streamed_message`. Tests use a scripted LangChain chat model: 81 pass. Only construction + tool binding were checked offline for Claude and Gemini; no live call to either was made.
+- Approve, then name (2026-11-03): the page owns the steps after a successful build, so they do not depend on the model. `policy_confirmation_blockers` rejects a proposed draft whose thresholds were not stated by the manager. Saying “good customers” or “small stuff” does not by itself require tenure or an amount; the drafter asks what those words mean. the working draft is left unchanged and the matching pick list is shown. A clean build shows "Does this policy look right?" (Yes, save it / I want to change it). Yes reveals the name box prefilled by `suggest_policy_name` (rule ids, skipping names already taken). Save writes `policies/<name>.json`. Success text is `Saved “name” to policies`. Preview heading no longer mentions activation.
+- Quick pick fallback (2026-11-03): the model sometimes omits the clarify marker and asks two thresholds at once. The page now also detects the preset lists it offers ($25/$30/$50, 6/12/24 months, 7/14/30 days) and shows the first unconfirmed one. `$` is escaped in chat so "$25, $30" is not rendered as math. Prompt: one missing threshold per reply, with an example ending.
+- Check, then Save (2026-11-03, user-approved flow): when answers are clear the agent calls build_policy first. Invalid → it fixes and retries, or asks one question. Proposed → plain-language summary + preview, asks for a name, ends with hidden `[[ready_to_build]]`. The host shows the Save section only when that same turn produced a `proposed` draft and the marker; Save writes that checked draft to `policies/<name>.json` with no further model call. Names: lowercase letters/digits/`-`/`_`, max 50 characters, must not already exist; the file is opened with mode `x` and never overwritten; the draft must be `status: draft` and pass `policy_schema_errors`. Saving is not activation; activate/rollback stays deferred (user: "later"). Folder renamed by user `policy/` → `policies/`; code/test paths updated, historical task evidence left as written. Tests: 76 pass.
 - Fix (2026-11-03): build_policy failed in a loop because invalid drafts returned only "does not match the supported policy schema". `policy_schema_errors` in the evaluator now names the broken rule/condition and the fix (e.g. one rule per stated_reason); `validate_policy` keeps identical valid/invalid results. Prompt gained rule-writing guidance, one question per reply, no re-asking stated numbers, and a warning when a dropped qualifier widens a rule. Tool-round cap 4 → 6. Tests: 71 pass.
 - Fix (2026-11-03): a picked threshold is recorded in session state and its Quick pick never reappears, even if the model repeats the marker. Prompt now forbids markers when not asking, and requires plain business language (no JSON, field names, rule structure, or safety-check lists in replies).
 
@@ -89,7 +207,7 @@ Completed preview-utility acceptance checks:
 
 Acceptance checks for the approved conversational Streamlit manager slice:
 - [x] The manager can describe a policy change across conversation turns, with the current draft retained in the Streamlit session.
-- [x] Before any tool call, the agent asks targeted questions about vague concepts such as “good customers” or “small stuff” and guides the manager toward supported schema values such as amount ranges. It does not invent an unconfirmed threshold. *(Covered as system-instruction / prompt guidance; focused tests assert guidance is present. Live model clarification behavior is not runtime-tested against OpenAI.)*
+- [x] Before any tool call, an unclear phrase is looked up in the data dictionary and checked with query_history, then the manager is asked which reading they meant. The drafter does not keep a private word list (“good customers” is not tenure, “small stuff” is not a dollar cap, “picking error” is not the wrong-item reason). It does not offer a number until the manager confirms the meaning. *(Covered as system-instruction / prompt guidance; focused tests assert guidance is present. Live model clarification behavior is not runtime-tested against OpenAI.)*
 - [x] Only after required answers are clear does the agent call the Python function tool named `build_policy`, registered and invoked by the Streamlit host as the model tool. The tool receives a complete structured candidate, validates it, previews prior and candidate drafts on the same local pending cohort, and returns the updated draft with aggregate preview results. *(Host injects session `current_draft`; OpenAI path mocked in tests.)*
 - [x] Invalid candidates or failed previews are not presented as proposed drafts and do not replace the current session draft. The result contains aggregate counts/amounts and deltas only; request rows, IDs, customer fields, and notes remain local.
 - [x] No CLI `main` or candidate-envelope file is part of this workflow. Conversation state and function arguments/results are handled in memory by the Streamlit flow.
@@ -315,7 +433,7 @@ No material correctness or assignment-boundary blockers for this slice.
 ## Approved engineer handoff: conversational Streamlit manager flow
 
 1. Keep the manager's current draft and conversation in Streamlit session state. The manager describes a change over one or more turns.
-2. The agent first resolves ambiguity with targeted questions. For “good customers,” “small stuff,” or similar vague concepts, ask what the manager means and guide toward supported fields/operators and concrete values such as an amount range. Do not guess missing numbers or call the tool while required answers remain unclear.
+2. The agent first resolves ambiguity with the data dictionary and history. For an unclear phrase, find the dictionary fields it could mean, check those readings with query_history, and ask the manager which reading they meant, quoting the counts. Do not keep a private word list, and do not offer a number or call build_policy while the meaning is still unconfirmed.
 3. Once clear, the agent calls the Python function tool `build_policy` registered by Streamlit. Pass a complete structured candidate based on the current draft. The function validates it with `validate_policy`, previews current and candidate drafts against the same local pending cohort through `utils.policy_preview`, and returns the candidate plus aggregate preview results only after both previews succeed. A validation/preview failure leaves the session draft unchanged.
 4. Keep preview rows and customer data inside local code. Do not send customer request rows, IDs, customer fields, or customer/support note text to a model provider. Do not make a provider call unless a provider/runtime is configured and data-sharing is approved; retain an offline/mock path.
 5. Do not add a CLI `main` or candidate-envelope file. Prompt/agent files, if present, are behavior guidance only and do not configure a provider or runtime. The tool has no approval, rejection, payment, live-policy write, activation, or versioning capability. Activation/versioning require a future separate explicit manager action.
@@ -435,7 +553,7 @@ One page. First boot: no live allow-rules (`allow: []`, or no live file treated 
 2. On that page they can:
    - **Download** the current policy as JSON.
    - **Evaluate on history** — what `evaluate` would decide for each history row under the current policy. This is not the chat agent judging tickets. Same function as intake.
-   - **Talk to an agent** to update the policy. The agent asks guiding questions (what is small stuff, what is a good customer, 14-day window, …) so the JSON is filled in the clearest way the schema allows. Output is a **draft** version, never live. `policy/auto-approve.example.json` is a proposal the agent may offer, with the evidence, not the file that is already live.
+   - **Talk to an agent** to update the policy. The agent asks what vague words mean (for example whether “small” is cost or size) before it fills a number, so the JSON uses only meanings the manager confirmed. Output is a **draft** version, never live. `policy/auto-approve.example.json` is a proposal the agent may offer, with the evidence, not the file that is already live.
 3. Admin sees the **results and evaluation of the new (draft) policy** next to the current one, and **picks which policy to use**. Pick = activate that version. The other version stays in history. They can pick current (do nothing) or the draft (go live) or an older download they still have.
 
 The chat never sets `decided_by=auto`. After a pick, intake uses the chosen JSON through `evaluate`.

@@ -12,6 +12,12 @@ Report only to Project Delivery Lead and perform only its delegated task or repa
 
 If the delegated work would diverge from the assignment, stop, flag it to the lead with the clause it violates, and do not continue that work.
 
+## Navigate with graphify
+
+The repo has a graphify knowledge graph in `graphify-out/` (code, briefs, agents, and the assignment PDF). Before exploring with Read, Grep, or Glob, run `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"`. Read source files directly only to edit or debug specific lines, or when the graph lacks the detail. The graph is a map, not evidence: confirm behavior in the code and tests before you report it.
+
+Before changing a function, run `graphify explain` on it to see callers, tests, and briefs that depend on it. After changing code, run `graphify update .` (code only, no API cost) so the graph stays current.
+
 ## Design and Implementation
 
 - The system itself can be thin. Build the smallest local app that applies the Part 1 line and supports the two Part 2 mechanisms. Streamlit or another simple local web app is enough.

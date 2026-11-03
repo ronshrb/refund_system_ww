@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from utils.policy.policy_preview import preview_matching_rows
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PENDING_PATH = PROJECT_ROOT / "data" / "raw" / "pending.csv"
+HISTORY_PATH = PROJECT_ROOT / "data" / "raw" / "history.csv"
 _CENT = Decimal("0.01")
 
 
@@ -65,6 +67,37 @@ def _aggregate(matches):
         "approved_count": len(matches),
         "approved_total_usd": format(total.quantize(_CENT), "f"),
     }
+
+
+def history_evidence(policy_path):
+    """Summarize how the candidate would have matched past requests.
+
+    Matching uses intake fields only (the preview drops post-decision columns).
+    Past decisions are then looked up by request id and reported as what
+    reviewers did at the time, not as proof the rule is right or wrong.
+    """
+    rows = load_rows(HISTORY_PATH)
+    matches = preview_matching_rows(rows, policy_path, already_paid_ids=set())
+    decision_by_id = {row.get("request_id"): row.get("decision") or "unknown" for row in rows}
+    amounts = sorted(
+        amount for amount in (parse_amount(row.get("amount_usd")) for row in matches)
+        if amount is not None
+    )
+    past_decisions = Counter(decision_by_id.get(row.get("request_id"), "unknown") for row in matches)
+    reasons = Counter(row.get("stated_reason") or "unknown" for row in matches)
+    evidence = {
+        "note": "Past decisions are descriptive only, not ground truth.",
+        "history_rows": len(rows),
+        "match_count": len(matches),
+        "matched_total_usd": format(sum(amounts, Decimal("0.00")).quantize(_CENT), "f"),
+        "past_decisions": dict(past_decisions.most_common()),
+        "by_stated_reason": dict(reasons.most_common()),
+    }
+    if amounts:
+        evidence["amount_min_usd"] = format(amounts[0].quantize(_CENT), "f")
+        evidence["amount_median_usd"] = format(amounts[len(amounts) // 2].quantize(_CENT), "f")
+        evidence["amount_max_usd"] = format(amounts[-1].quantize(_CENT), "f")
+    return evidence
 
 
 def _validate_draft(policy, label):
@@ -130,6 +163,11 @@ def build_policy(candidate_policy, current_draft, assumptions=(), cannot_express
 
             prior_summary = _aggregate(prior_matches)
             candidate_summary = _aggregate(candidate_matches)
+            try:
+                evidence = history_evidence(candidate_path)
+            except Exception:
+                # Evidence helps the conversation; it must not block a valid build.
+                evidence = None
 
         prior_total = Decimal(prior_summary["approved_total_usd"])
         candidate_total = Decimal(candidate_summary["approved_total_usd"])
@@ -149,6 +187,7 @@ def build_policy(candidate_policy, current_draft, assumptions=(), cannot_express
                     ),
                 },
             },
+            "history_evidence": evidence,
         }
     except Exception:
         return _error("error", "Policy validation or local preview failed.")

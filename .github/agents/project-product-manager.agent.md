@@ -15,6 +15,12 @@ Typical briefs: Part 1 line/evidence (`tasks/00-understand-data.md`, `tasks/01-a
 
 If the delegated work would diverge from the assignment, stop, flag it to the lead with the clause it violates, and do not continue that work.
 
+## Navigate with graphify
+
+The repo has a graphify knowledge graph in `graphify-out/` (code, briefs, agents, and the assignment PDF). Before exploring with Read, Grep, or Glob, run `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"`. Read source files directly only to edit or debug specific lines, or when the graph lacks the detail. The graph is a map, not evidence: confirm behavior in the code and tests before you report it.
+
+Use `graphify explain` on assignment concepts (for example "reviewer queue" or "policy preview") to find which briefs, docs, and code implement them before writing requirements.
+
 ## Product and Business Work
 
 1. Map the current process, stakeholders, decisions, and outcomes. Separate documented facts from inferred process details. The sample CSVs are not full volume; some historical decisions were wrong.

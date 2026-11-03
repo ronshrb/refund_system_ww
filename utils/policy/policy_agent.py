@@ -1,36 +1,61 @@
-"""Manager policy-drafting agent: one OpenAI turn with local tools.
+"""Manager policy-drafting agent: one LangGraph turn with local tools.
 
-Never approves refunds or activates policy. History query is for the assignment
-demo on synthetic sample data; historical decisions are not ground-truth labels.
+The model comes from LangChain, so OpenAI, Claude, or Gemini can drive the
+same graph (see ``llm_provider``). Never approves refunds or activates policy.
+History query is for the assignment demo on synthetic sample data; historical
+decisions are not ground-truth labels.
 """
 
 from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import Any, Callable, Mapping, Sequence
+from typing import Annotated, Any, Callable, Mapping, Sequence, TypedDict
 
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langgraph.errors import GraphRecursionError
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+
+from utils.policy.llm_provider import (
+    PROVIDERS,
+    llm_configured,
+    make_chat_model,
+    offline_message,
+    provider_settings,
+)
 from utils.policy.policy_agent_utils import (
     BUILD_POLICY_TOOL_NAME,
-    OFFLINE_MESSAGE,
-    OPENAI_API_KEY,
+    CLARIFY_PRESET_VALUES,
+    POLICIES_DIR,
     QUERY_HISTORY_TOOL_NAME,
     apply_build_policy_result,
     assert_messages_safe_for_provider,
     assistant_text_from_tool_results,
     build_policy_tool_schema,
-    collect_streamed_message,
     conversation_messages_for_provider,
     ensure_session_defaults,
     execute_build_policy_arguments,
     execute_registered_tool,
     format_preview_summary_for_manager,
     load_template_draft,
+    policy_confirmation_blockers,
+    policy_name_error,
     provider_payload_contains_forbidden_customer_data,
     query_history_tool_schema,
     registered_tool_names,
     registered_tool_schemas,
+    save_policy_draft,
+    suggest_policy_name,
     tool_result_for_model,
+    unrequested_question_topics,
 )
 
 DATA_DICTIONARY_TEXT = """
@@ -54,6 +79,28 @@ decided_at: When the decision was recorded. (Post-decision.)
 review_minutes: Minutes the reviewer spent (blank for auto). (Post-decision.)
 Note: Column descriptions describe intended contents; the sample data does not always comply.
 """.strip()
+
+
+def _preset_phrase(values: tuple[int, ...], *, prefix: str = "", oxford_or: bool = False) -> str:
+    """Join one shared preset list the way the drafter prompt lists it."""
+    rendered = [f"{prefix}{value}" for value in values]
+    if oxford_or and len(rendered) > 1:
+        return ", ".join(rendered[:-1]) + ", or " + rendered[-1]
+    return ", ".join(rendered)
+
+
+def _clarification_preset_bullets() -> str:
+    """The three preset offers, built only from ``CLARIFY_PRESET_VALUES``."""
+    amount = _preset_phrase(CLARIFY_PRESET_VALUES["amount_usd_lte"], prefix="$")
+    tenure = _preset_phrase(CLARIFY_PRESET_VALUES["tenure_months_gte"], oxford_or=True)
+    window = _preset_phrase(CLARIFY_PRESET_VALUES["days_since_delivery_lte"], oxford_or=True)
+    return (
+        f"  - refund amount, only after they say they mean cost: {amount}, or custom\n"
+        f"  - how long the person has been a customer, only after they say that is what they mean: {tenure} months, or custom\n"
+        f"  - days since delivery, only after they mention a delivery window without a number: {window}\n"
+        f"    days, or custom"
+    )
+
 
 SYSTEM_INSTRUCTIONS = """You are the Policy Drafter for a Refund Operations Manager.
 
@@ -80,14 +127,18 @@ Do not invent fields, operators, rails, reject actions, or partial refunds.
 How to write rules (the validator rejects anything else):
 - Keep "version" from the current draft and set "status" to exactly "draft".
 - Conditions inside one "when" are AND. Separate rules are OR.
-- stated_reason takes exactly one string, never a list. For several reasons
-  (for example our mistakes), write one rule per reason.
+- stated_reason takes exactly one string, never a list. For more than one
+  reason, write one rule per reason.
 - Each rule id is unique, short, and snake_case.
 - Example: {"id": "changed_mind_14d", "action": "approve_full", "all_of":
   [{"when": {"stated_reason": "changed_mind", "days_since_delivery_lte": 14}}]}
-- Manager words to reasons: wrong item or picking error -> wrong_item;
-  damaged -> arrived_damaged; lost or not delivered -> never_arrived. If a
-  phrase has no matching reason, say so instead of picking a close one.
+- A phrase is a stated reason only when the data dictionary uses those words,
+  ignoring spacing and case, or when the history sample itself spells it that
+  way. wrong item is wrong_item. arrived damaged and damaged are
+  arrived_damaged. late is late_delivery. Do not add synonyms. Picking error
+  is not a stated reason; it appears in support notes. Lost is not a stated
+  reason unless they confirm they mean never arrived. If nothing in the
+  dictionary matches, say so instead of picking a close reason.
 
 How you talk to the manager:
 - The manager is not technical. Use plain business language only.
@@ -96,59 +147,102 @@ How you talk to the manager:
   page already shows the draft separately.
 - Do not list the safety checks (fraud, notes, customer id, already paid) as
   rule conditions; just say standard safety checks still apply.
-- Do not announce that you are about to build the draft. If everything is
-  clear, call build_policy in the same reply, then summarize the result.
+- When every answer is clear, call build_policy right away to check the
+  policy. Do not announce it first and do not summarize before it passes.
+- Only after build_policy returns "proposed" in this reply: give a short
+  plain-language summary of the full policy (one bullet per rule) and what
+  the preview shows. If history_evidence shows something the manager should
+  know (see "Deciding what to ask"), mention it in one sentence with the
+  numbers. Then ask whether this is what they want. Stop there.
+  Do not ask for a name and do not say you are saving. The page asks for a
+  name only after the manager agrees, and the page does the saving.
 
 Light chain of thought (keep short, plain language):
 - Before asking a question or calling a tool, open with at most 3 short
   bullets: what you understood, what is still unclear, and one edge case
   worth checking. No technical terms.
 
+Deciding what to ask:
+- Ask only about two things: (1) what the manager actually said that is
+  vague or missing a number, and (2) what the history data shows about the
+  rule they described.
+- Do not add conditions the manager did not mention. If they say "change of
+  mind within 14 days", do not ask about a refund amount, how long someone
+  has been a customer, or a delivery window unless they brought that up or
+  the data gives a concrete reason.
+- When their words are unclear, do not guess and do not ask a bare "what do
+  you mean?". Use the data dictionary to find the fields those words could
+  refer to, call query_history for each plausible reading, and ask which
+  reading they meant. Quote the counts. Past decisions are context, not proof.
+- Before building a rule that is already clear, you may call query_history
+  with that rule's conditions to see what it would have covered. Raise a
+  question from the data only when the numbers show a real risk or edge case,
+  and quote them. For example: most matches are far above the typical amount,
+  many past requests like these were rejected by reviewers, or the rule covers
+  a reason the manager did not name.
+- If nothing is vague and the data shows nothing notable, build right away.
+- If they describe something no dictionary field can express, say so plainly.
+  Do not invent a field to make it fit.
+
 Clarification before build_policy:
-- Ask focused clarifying questions when intent, fields, operators, or numeric
-  thresholds are ambiguous.
 - Ask in business terms. The manager may not know schema field names; do not
-  ask them to pick columns or operators. Propose a plain-language mapping to a
-  supported condition and confirm it.
+  ask them to pick columns or operators.
 - Ask at most one question per reply.
-- For vague phrases such as "good customers", "old customers", or "small
-  stuff", do **one clear ask** for the missing numeric threshold in that turn.
-  Do not invent, suggest, or recommend a number outside the presets (never
-  "should it be 12 months?").
+- Do not decide a vague phrase on your own, and do not keep a private list of
+  what words mean. "Good customers" and "old customers" are not automatically
+  a tenure rule. "Small stuff" is not automatically a dollar cap or item size.
+- For a vague phrase, look it up, then do **one clear ask**. Read the data
+  dictionary for fields the words could refer to. Call query_history for each
+  plausible reading and use those counts in the question. Name only readings
+  the dictionary supports. If it has no match, say so. Do not offer a number,
+  and do not add a marker, until they confirm the meaning.
+- Example: they say "small stuff". The dictionary has a refund amount and a
+  size reason. Ask which they mean, and quote what history shows for low
+  amounts and for the size reason. Do not pick one.
 - Numbers the manager already stated (for example "within 14 days") are
   confirmed. Do not ask about them again.
 - If the manager drops a qualifier from a rule, say plainly what the rule now
   covers (for example "every refund of $30 or less, for any reason") and ask
   once whether that wider rule is intended before building it.
-- Offer presets in the question and mention the on-screen pick list:
-  - amount ("small stuff"): $25, $30, $50, or custom
-  - tenure ("good"/"old" customers): 6, 12, or 24 months, or custom
-  - delivery window when needed: 7, 14, or 30 days, or custom
-- If the manager's reply is still vague, ask **once more** with the same
-  presets only; do not silently fill a value.
+- Only after the meaning is confirmed and the number is still missing, offer
+  the presets and mention the on-screen pick list. Do not invent, suggest, or
+  recommend a number outside these presets:
+__CLARIFY_PRESET_BULLETS__
+- If the manager's reply is still vague, ask **once more**. Do not silently
+  fill a meaning or a value.
 - Never silently invent numeric values. For every numeric value not explicitly
   stated or pick-list-confirmed by the manager, do not put it in a candidate.
-- When your reply asks for one of those thresholds and the manager has not yet
+- When your reply asks for a confirmed threshold and the manager has not yet
   answered it, end the message with exactly one marker line (hidden UI hint):
   [[clarify:amount_usd_lte]] or [[clarify:tenure_months_gte]] or
   [[clarify:days_since_delivery_lte]]
-  Use at most one marker per reply. Never add a marker when you are not
-  asking a question, when the value is already confirmed, or when the manager
-  dropped that requirement.
+  Use at most one marker per reply. Never add a marker when you are asking
+  what a vague phrase means, when you are not asking a question, when the
+  value is already confirmed, or when the manager dropped that requirement.
+- If two or more thresholds are missing, ask only for the first one now and
+  the next one after the manager answers.
+- Example, only after they said they mean the refund amount (marker on its own
+  last line):
+  What refund amount should count: __CLARIFY_AMOUNT_PRESETS__, or another amount?
+  [[clarify:amount_usd_lte]]
 
 Tools:
 - `query_history`: optional filters against the local synthetic history sample.
   Use it to see how many past requests match a draft rule sketch, spot edge
   cases, and ask better clarifying questions. Historical decisions are
   descriptive only — not proof that a rule is correct or safe.
-- `build_policy`: after policy-affecting answers are clear, pass a complete
-  candidate_policy based on the current session draft. Optionally pass
-  assumptions and cannot_express. The host injects current_draft. For a clearly
-  stated but unsupported requirement, put an explanation in cannot_express.
-  Do not call build_policy while required answers remain unclear.
+- build_policy's "proposed" result also includes history_evidence: how many
+  past requests the rule would have matched, their amount range, and what
+  reviewers decided then. Use it to decide whether anything is worth raising.
+- `build_policy`: validates and previews a complete candidate_policy based on
+  the current session draft. Optionally pass assumptions and cannot_express.
+  The host injects current_draft. For a clearly stated but unsupported
+  requirement, put an explanation in cannot_express. Do not call it while
+  required answers remain unclear.
 - If build_policy returns invalid/error, read the error, fix exactly what it
   names, and call build_policy again without narrating the failure to the
-  manager. Only explain if it still fails.
+  manager. If the fix needs a decision only the manager can make, ask one
+  plain-language question instead.
 
 After a tool result:
 - status "proposed" means the local host may adopt the returned draft; summarize
@@ -156,7 +250,10 @@ After a tool result:
 - status "invalid", "error", or "cannot_express" leaves the session draft
   unchanged; explain clearly.
 - Never treat a proposal or history match as activation or a refund.
-"""
+""".replace("__CLARIFY_PRESET_BULLETS__", _clarification_preset_bullets()).replace(
+    "__CLARIFY_AMOUNT_PRESETS__",
+    _preset_phrase(CLARIFY_PRESET_VALUES["amount_usd_lte"], prefix="$"),
+)
 
 
 def build_system_message(current_draft: Mapping[str, Any]) -> str:
@@ -172,17 +269,130 @@ def build_system_message(current_draft: Mapping[str, Any]) -> str:
     )
 
 
+class AgentState(TypedDict):
+    """State that flows through the agent graph for one manager turn."""
+
+    messages: Annotated[list[AnyMessage], add_messages]
+    draft: dict[str, Any]
+    draft_updated: bool
+    preview_summary: dict[str, Any] | None
+    tool_results: list[dict[str, Any]]
+    manager_texts: list[str]
+    guard_used: bool
+
+
+def _guard_note(topics: Sequence[str]) -> str:
+    return (
+        "[Host check, not from the manager] Your last reply asked about "
+        f"{' and '.join(topics)}, which the manager did not mention. Do not add "
+        "conditions they did not ask for. If their words are unclear, use the "
+        "data dictionary and query_history to find the plausible readings, then "
+        "ask which one they mean. Do not offer a number until they confirm it. "
+        "If their request is clear, call build_policy now."
+    )
+
+
+def build_agent_graph(chat_model: Any) -> Any:
+    """Compile the agent loop: model → (tools → model)* → guard → end.
+
+    The model only proposes tool calls. The ``tools`` node runs them in local
+    Python and is the only place the session draft can change, and only on a
+    ``proposed`` build result. The ``guard`` node checks the final reply in
+    code: if it asks about a topic the manager never raised, the reply is
+    dropped and the model gets one retry with a host note.
+    """
+    model_with_tools = chat_model.bind_tools(registered_tool_schemas())
+
+    def call_model(state: AgentState) -> dict[str, Any]:
+        return {"messages": [model_with_tools.invoke(state["messages"])]}
+
+    def run_tools(state: AgentState) -> dict[str, Any]:
+        draft = state["draft"]
+        draft_updated = state["draft_updated"]
+        preview_summary = state["preview_summary"]
+        tool_results = list(state["tool_results"])
+        replies: list[ToolMessage] = []
+        for call in state["messages"][-1].tool_calls:
+            result = execute_registered_tool(call["name"], call["args"], draft)
+            tool_results.append(result)
+            if call["name"] == BUILD_POLICY_TOOL_NAME:
+                next_draft, changed = apply_build_policy_result(draft, result)
+                if changed:
+                    draft = next_draft
+                    draft_updated = True
+                    preview_summary = result.get("preview_summary")
+            replies.append(
+                ToolMessage(
+                    content=json.dumps(tool_result_for_model(result), default=str),
+                    tool_call_id=call["id"],
+                    name=call["name"],
+                )
+            )
+        return {
+            "messages": replies,
+            "draft": draft,
+            "draft_updated": draft_updated,
+            "preview_summary": preview_summary,
+            "tool_results": tool_results,
+        }
+
+    def guard_reply(state: AgentState) -> dict[str, Any]:
+        last = state["messages"][-1]
+        if state["guard_used"]:
+            return {}
+        topics = unrequested_question_topics(last.text, state["manager_texts"])
+        if not topics:
+            return {}
+        return {
+            "messages": [RemoveMessage(id=last.id), HumanMessage(_guard_note(topics))],
+            "guard_used": True,
+        }
+
+    def after_model(state: AgentState) -> str:
+        last = state["messages"][-1]
+        return "tools" if getattr(last, "tool_calls", None) else "guard"
+
+    def after_guard(state: AgentState) -> str:
+        # The guard leaves a host note as the last message only when it fired.
+        return "model" if isinstance(state["messages"][-1], HumanMessage) else END
+
+    graph = StateGraph(AgentState)
+    graph.add_node("model", call_model)
+    graph.add_node("tools", run_tools)
+    graph.add_node("guard", guard_reply)
+    graph.add_edge(START, "model")
+    graph.add_conditional_edges("model", after_model, ["tools", "guard"])
+    graph.add_edge("tools", "model")
+    graph.add_conditional_edges("guard", after_guard, ["model", END])
+    return graph.compile()
+
+
+def _to_plain_messages(messages: Sequence[Any]) -> list[dict[str, Any]]:
+    """Turn LangChain messages into plain dicts for logging and safety checks."""
+    plain: list[dict[str, Any]] = []
+    for message in messages:
+        item: dict[str, Any] = {"role": message.type, "content": message.content}
+        if getattr(message, "tool_calls", None):
+            item["tool_calls"] = message.tool_calls
+        if isinstance(message, ToolMessage):
+            item["tool_call_id"] = message.tool_call_id
+        plain.append(item)
+    return plain
+
+
 def run_policy_agent_turn(
     *,
     user_text: str,
     history: Sequence[Mapping[str, str]],
     current_draft: Mapping[str, Any],
-    client: Any | None = None,
-    model: str = "gpt-4o-mini",
+    chat_model: Any | None = None,
+    provider: str | None = None,
+    api_key: str | None = None,
     max_tool_rounds: int = 6,
     on_text_delta: Callable[[str], None] | None = None,
+    on_text_reset: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Run one manager turn with OpenAI tool calling.
+    """Run one manager turn through the LangGraph agent loop.
 
     Session draft updates only on ``proposed``.
 
@@ -194,127 +404,126 @@ def run_policy_agent_turn(
         This turn's manager message (from Streamlit chat input).
     history :
         Prior chat turns as ``{"role", "content"}`` maps — not including the
-        current ``user_text`` (the page passes ``messages[:-1]``).
+        current ``user_text``.
     current_draft :
         Session policy JSON so far (starts from ``policy.template.json``).
-    client :
-        Optional OpenAI client; ``None`` creates one with ``OPENAI_API_KEY``
-        (tests inject a mock).
-    model :
-        OpenAI model id; default ``"gpt-4o-mini"``.
+    chat_model :
+        Optional LangChain chat model; ``None`` builds one from ``provider``
+        and ``api_key`` (tests inject a fake model).
+    provider :
+        ``"openai"``, ``"anthropic"``, or ``"gemini"``; ``None`` uses
+        ``LLM_PROVIDER`` (default ``openai``).
+    api_key :
+        Optional key; ``None`` uses the provider's environment variable.
     max_tool_rounds :
         Cap on model → tool → model loops so it cannot tool-call forever.
     on_text_delta :
-        Optional callback; when given, replies are streamed and each text
-        chunk is passed to it as it arrives (the page uses this to show text
-        gradually). ``None`` uses a single non-streamed call.
+        Optional callback; when given, each text chunk is passed to it as it
+        arrives (the page uses this to show text gradually).
+    on_text_reset :
+        Optional callback; called when the guard drops a reply that was
+        already streamed, so the page can clear it. The kept text is then
+        sent again through ``on_text_delta``.
     """
     draft = deepcopy(dict(current_draft))
+    if chat_model is None:
+        chat_model = make_chat_model(provider, api_key=api_key)
 
-    if client is None:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
-    # prepare system message + history + user message
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": build_system_message(draft)},
-        *conversation_messages_for_provider(history),
-        {"role": "user", "content": user_text},
+    start_messages: list[AnyMessage] = [
+        SystemMessage(build_system_message(draft)),
+        *(
+            HumanMessage(item["content"]) if item["role"] == "user" else AIMessage(item["content"])
+            for item in conversation_messages_for_provider(history)
+        ),
+        HumanMessage(user_text),
     ]
-    tools = registered_tool_schemas()
+    manager_texts = [
+        item["content"]
+        for item in conversation_messages_for_provider(history)
+        if item["role"] == "user"
+    ] + [user_text]
+    initial: AgentState = {
+        "messages": start_messages,
+        "draft": draft,
+        "draft_updated": False,
+        "preview_summary": None,
+        "tool_results": [],
+        "manager_texts": manager_texts,
+        "guard_used": False,
+    }
+    # Each round is a model step plus a tools step; the guard can add one
+    # retry (guard + model), and the final reply and guard pass add two more.
+    config = {"recursion_limit": 2 * max_tool_rounds + 4}
+    graph = build_agent_graph(chat_model)
 
-    tool_results: list[dict[str, Any]] = []
-    preview_summary: dict[str, Any] | None = None
-    draft_updated = False
-    assistant_text = ""
-    # Text from every round, so a reply written before a tool call is kept.
-    spoken_parts: list[str] = []
-
-    for _ in range(max_tool_rounds): # we limit the number of tool rounds to avoid infinite loops
+    final_state: dict[str, Any] = dict(initial)
+    stopped_early = False
+    try:
         if on_text_delta is None:
-            choice = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-            ).choices[0].message
+            final_state = graph.invoke(initial, config)
         else:
-            choice = collect_streamed_message(
-                client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    stream=True,
-                ),
-                on_text_delta,
-            )
+            current_id = None
+            spoke = False
+            for mode, payload in graph.stream(
+                initial, config, stream_mode=["messages", "updates", "values"]
+            ):
+                if mode == "values":
+                    final_state = payload
+                    continue
+                if mode == "updates":
+                    if (payload.get("guard") or {}).get("messages"):
+                        # The guard dropped the reply just shown; redraw what
+                        # is kept so the screen matches the saved reply.
+                        kept = [
+                            message.text.strip()
+                            for message in final_state["messages"][len(start_messages):-1]
+                            if isinstance(message, AIMessage) and message.text.strip()
+                        ]
+                        if on_text_reset is not None:
+                            on_text_reset()
+                            spoke = bool(kept)
+                            if kept:
+                                on_text_delta("\n\n".join(kept))
+                        current_id = None
+                    continue
+                chunk, metadata = payload
+                if metadata.get("langgraph_node") != "model":
+                    continue
+                text = chunk.text
+                if not text:
+                    continue
+                # A new model message starts a new paragraph on screen.
+                if chunk.id != current_id:
+                    if spoke:
+                        on_text_delta("\n\n")
+                    current_id = chunk.id
+                spoke = True
+                on_text_delta(text)
+    except GraphRecursionError:
+        stopped_early = True
 
-        tool_calls = list(choice.tool_calls or [])
-        assistant_message: dict[str, Any] = {
-            "role": "assistant",
-            "content": choice.content or "",
-        }
-        if tool_calls:
-            assistant_message["tool_calls"] = [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {
-                        "name": call.function.name,
-                        "arguments": call.function.arguments,
-                    },
-                }
-                for call in tool_calls
-            ]
-        messages.append(assistant_message)
-        if (choice.content or "").strip():
-            spoken_parts.append(choice.content.strip())
-            if on_text_delta is not None:
-                on_text_delta("\n\n")
-
-        if not tool_calls:
-            assistant_text = "\n\n".join(spoken_parts)
-            break
-
-        for call in tool_calls:
-            result = execute_registered_tool(
-                call.function.name, call.function.arguments, draft
-            )
-            tool_results.append(result)
-            if call.function.name == BUILD_POLICY_TOOL_NAME:
-                next_draft, changed = apply_build_policy_result(draft, result)
-                if changed:
-                    draft = next_draft
-                    draft_updated = True
-                    preview_summary = result.get("preview_summary")
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": json.dumps(
-                        tool_result_for_model(result), default=str
-                    ),
-                }
-            )
-    else:
+    turn_messages = final_state["messages"][len(start_messages):]
+    spoken = [
+        message.text.strip()
+        for message in turn_messages
+        if isinstance(message, AIMessage) and message.text.strip()
+    ]
+    if stopped_early:
         assistant_text = (
             "Stopped after the maximum number of tool rounds without a final "
             "assistant reply. The session draft was updated only if a proposed "
             "result was returned."
         )
-
-    if not assistant_text:
-        assistant_text = assistant_text_from_tool_results(
-            tool_results, preview_summary
+    else:
+        assistant_text = "\n\n".join(spoken) or assistant_text_from_tool_results(
+            final_state["tool_results"], final_state["preview_summary"]
         )
 
     return {
         "assistant_text": assistant_text or "(No assistant text returned.)",
-        "draft": draft,
-        "draft_updated": draft_updated,
-        "preview_summary": preview_summary,
-        "tool_results": tool_results,
-        "provider_messages": messages,
+        "draft": final_state["draft"],
+        "draft_updated": final_state["draft_updated"],
+        "preview_summary": final_state["preview_summary"],
+        "tool_results": final_state["tool_results"],
+        "provider_messages": _to_plain_messages(final_state["messages"]),
     }

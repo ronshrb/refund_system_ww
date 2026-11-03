@@ -8,32 +8,23 @@ descriptive only, not ground-truth labels.
 from __future__ import annotations
 
 import json
-import os
+import re
 from collections import Counter
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable, Mapping, MutableMapping, Sequence
+from typing import Any, Mapping, MutableMapping, Sequence
 
-from dotenv import load_dotenv
-
-from utils.data.data_processing import parse_amount
+from utils.data.data_processing import REASONS, parse_amount
 from utils.data.dataloader import load_rows
-from utils.policy.policy_draft_tool import build_policy
+from utils.policy.policy_draft_tool import _json_dumps, build_policy
+from utils.policy.policy_evaluator import compare_policy_field, policy_schema_errors
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-TEMPLATE_PATH = PROJECT_ROOT / "policy" / "policy.template.json"
+TEMPLATE_PATH = PROJECT_ROOT / "policies" / "policy.template.json"
 HISTORY_PATH = PROJECT_ROOT / "data" / "raw" / "history.csv"
-
-load_dotenv(PROJECT_ROOT / ".env", override=False)
-OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
-
-OFFLINE_MESSAGE = (
-    "OpenAI is not configured. Set `OPENAI_API_KEY` in the repository-root "
-    "`.env` file to enable the policy drafting agent. This offline path does "
-    "not invent a model reply and cannot call `build_policy`."
-)
+POLICIES_DIR = PROJECT_ROOT / "policies"
+_POLICY_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,49}")
 
 BUILD_POLICY_TOOL_NAME = "build_policy"
 QUERY_HISTORY_TOOL_NAME = "query_history"
@@ -53,12 +44,70 @@ _HISTORY_SAMPLE_FIELDS = (
 
 
 def load_template_draft() -> dict[str, Any]:
-    """Load a fresh draft from ``policy/policy.template.json``."""
+    """Load a fresh draft from ``policies/policy.template.json``."""
     return json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
 
 
+def _candidate_policy_schema() -> dict[str, Any]:
+    """Spell out the closed policy shape for the model.
+
+    Every object lists its properties because Gemini rejects free-form objects;
+    it also shows every provider exactly which conditions exist. The validator
+    in ``policy_evaluator`` stays the authority on what is accepted.
+    """
+    integer = {"type": "integer"}
+    flag = {"type": "boolean", "description": "Only true is allowed."}
+    when = {
+        "type": "object",
+        "description": "Conditions that must all hold (AND).",
+        "properties": {
+            "stated_reason": {"type": "string", "enum": sorted(REASONS)},
+            "days_since_delivery_gte": integer,
+            "days_since_delivery_lte": integer,
+            "amount_usd_gt": {"type": "number"},
+            "amount_usd_lte": {"type": "number"},
+            "tenure_months_gte": integer,
+            "fraud_flag": {"type": "string", "enum": ["no"]},
+            "customer_id_present": flag,
+            "customer_note_blank": flag,
+            "support_note_blank": flag,
+            "request_id_not_already_paid": flag,
+        },
+    }
+    rule = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Unique snake_case id."},
+            "action": {"type": "string", "enum": ["approve_full"]},
+            "all_of": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"when": when, "comment": {"type": "string"}},
+                    "required": ["when"],
+                },
+            },
+        },
+        "required": ["id", "action", "all_of"],
+    }
+    return {
+        "type": "object",
+        "description": (
+            "Complete candidate policy. Keep version from the current draft; "
+            "status must be 'draft'. Separate rules are OR."
+        ),
+        "properties": {
+            "version": integer,
+            "status": {"type": "string", "enum": ["draft"]},
+            "comment": {"type": "string"},
+            "allow": {"type": "array", "items": rule},
+        },
+        "required": ["version", "status", "allow"],
+    }
+
+
 def build_policy_tool_schema() -> dict[str, Any]:
-    """Return the OpenAI tools-API registration shape for ``build_policy`` only."""
+    """Return the tool registration shape for ``build_policy``."""
     return {
         "type": "function",
         "function": {
@@ -73,13 +122,7 @@ def build_policy_tool_schema() -> dict[str, Any]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "candidate_policy": {
-                        "type": "object",
-                        "description": (
-                            "Complete candidate policy object with version, "
-                            "status 'draft', comment, and allow rules."
-                        ),
-                    },
+                    "candidate_policy": _candidate_policy_schema(),
                     "assumptions": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -95,14 +138,13 @@ def build_policy_tool_schema() -> dict[str, Any]:
                     },
                 },
                 "required": ["candidate_policy"],
-                "additionalProperties": False,
             },
         },
     }
 
 
 def query_history_tool_schema() -> dict[str, Any]:
-    """Return the OpenAI tools-API shape for local ``query_history``."""
+    """Return the tool registration shape for local ``query_history``."""
     return {
         "type": "function",
         "function": {
@@ -119,7 +161,11 @@ def query_history_tool_schema() -> dict[str, Any]:
                 "properties": {
                     "stated_reason": {
                         "type": "string",
-                        "description": "Exact stated_reason to match, if any.",
+                        "description": (
+                            "Dictionary stated_reason. Spacing and case are "
+                            "ignored, and the sample spellings damaged and late "
+                            "are included."
+                        ),
                     },
                     "amount_usd_lte": {
                         "type": "number",
@@ -147,27 +193,231 @@ def query_history_tool_schema() -> dict[str, Any]:
                     },
                     "fraud_flag": {
                         "type": "string",
-                        "description": "Exact fraud_flag to match (e.g. 'no').",
+                        "description": (
+                            "Fraud check. 'no' matches the clear tokens "
+                            "no, n, and false. 'yes' matches raised tokens."
+                        ),
                     },
                     "sample_limit": {
                         "type": "integer",
                         "description": "Max sample rows to return (1-20, default 5).",
                     },
                 },
-                "additionalProperties": False,
             },
         },
     }
 
 
 def registered_tool_schemas() -> list[dict[str, Any]]:
-    """Return all OpenAI tool schemas registered for the manager agent."""
+    """Return all tool schemas registered for the manager agent."""
     return [build_policy_tool_schema(), query_history_tool_schema()]
 
 
 def registered_tool_names() -> tuple[str, ...]:
     """Return tool names registered for the manager agent."""
     return (BUILD_POLICY_TOOL_NAME, QUERY_HISTORY_TOOL_NAME)
+
+
+_THRESHOLD_KINDS = {
+    "amount_usd_lte": "amount_usd_lte",
+    "amount_usd_gt": "amount_usd_lte",
+    "tenure_months_gte": "tenure_months_gte",
+    "days_since_delivery_lte": "days_since_delivery_lte",
+    "days_since_delivery_gte": "days_since_delivery_lte",
+}
+def _number_token(value: Any) -> str | None:
+    """Render a threshold the way a manager would have typed it."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, int):
+        return str(value)
+    return str(value)
+
+
+def _number_stated(user_text: str, value: Any) -> bool:
+    """Return whether the manager's own messages contain this threshold."""
+    token = _number_token(value)
+    if token is None:
+        return False
+    return re.search(rf"(?<!\d){re.escape(token)}(?!\d)", user_text) is not None
+
+
+def policy_confirmation_blockers(
+    draft: Mapping[str, Any], user_messages: Sequence[Mapping[str, str]]
+) -> list[dict[str, str]]:
+    """Return reasons a built draft must not be offered for approval yet.
+
+    The page uses this instead of trusting the model. A threshold in the draft
+    counts only if the manager stated or picked that number. A vague phrase
+    such as "good customers" or "small stuff" does not by itself require a
+    tenure or an amount.
+    """
+    user_text = "\n".join(
+        message.get("content") or ""
+        for message in user_messages
+        if message.get("role") == "user"
+    )
+    blockers: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for rule in draft.get("allow") or []:
+        if not isinstance(rule, Mapping):
+            continue
+        for group in rule.get("all_of") or []:
+            conditions = group.get("when") if isinstance(group, Mapping) else None
+            if not isinstance(conditions, Mapping):
+                continue
+            for field, kind in _THRESHOLD_KINDS.items():
+                if field not in conditions or kind in seen:
+                    continue
+                if _number_stated(user_text, conditions[field]):
+                    continue
+                seen.add(kind)
+                blockers.append(
+                    {"kind": kind, "detail": _unconfirmed_detail(kind, conditions[field])}
+                )
+    return blockers
+
+
+def _unconfirmed_detail(kind: str, value: Any) -> str:
+    shown = _number_token(value) or value
+    if kind == "amount_usd_lte":
+        return f"This draft uses a ${shown} amount you have not chosen."
+    if kind == "tenure_months_gte":
+        return f"This draft uses {shown} months of tenure, which you have not chosen."
+    return f"This draft uses a {shown}-day window you have not chosen."
+
+
+def suggest_policy_name(
+    draft: Mapping[str, Any], policies_dir: Path = POLICIES_DIR
+) -> str:
+    """Build a free, editable file name from the draft's rule ids."""
+    parts: list[str] = []
+    for rule in draft.get("allow") or []:
+        if not isinstance(rule, Mapping) or not isinstance(rule.get("id"), str):
+            continue
+        slug = re.sub(r"[^a-z0-9]+", "-", rule["id"].strip().lower()).strip("-")
+        if slug:
+            parts.append(slug)
+    base = "-".join(parts)[:50].strip("-") or "refund-policy"
+    if not _POLICY_NAME_PATTERN.fullmatch(base):
+        base = "refund-policy"
+    name = base
+    for suffix in range(2, 100):
+        if policy_name_error(name, policies_dir) is None:
+            return name
+        extra = f"-{suffix}"
+        name = base[: 50 - len(extra)].strip("-") + extra
+    return name
+
+
+# Only definitions of the clarify marker, preset values, and preset-mention regexes.
+CLARIFY_PRESET_VALUES: dict[str, tuple[int, ...]] = {
+    "amount_usd_lte": (25, 30, 50),
+    "tenure_months_gte": (6, 12, 24),
+    "days_since_delivery_lte": (7, 14, 30),
+}
+CLARIFY_MARKER_PATTERN = re.compile(
+    r"\[\[clarify:(" + "|".join(CLARIFY_PRESET_VALUES) + r")\]\]"
+)
+
+
+def _preset_mention_pattern(values: tuple[int, ...]) -> re.Pattern[str]:
+    """Match the preset numbers in order, with a little text between them."""
+    body = r"\D{1,12}".join(str(value) for value in values)
+    return re.compile(rf"\b{body}\b")
+
+
+# The preset lists the agent offers; spotted when it forgets the marker.
+CLARIFY_PRESET_PATTERNS = {
+    kind: _preset_mention_pattern(values) for kind, values in CLARIFY_PRESET_VALUES.items()
+}
+# Words that show the manager raised the topic themselves.
+_TOPIC_MENTION_PATTERNS = {
+    "amount_usd_lte": re.compile(
+        r"\$|\d\s*(?:usd|dollars?)\b|\b(?:cheap|low[- ]value|amount|price|cost|"
+        r"cap|limit|under|below|up to|less than|expensive)\b",
+        re.IGNORECASE,
+    ),
+    "tenure_months_gte": re.compile(
+        r"\btenure\b|\bhow long\b|\b(?:been|for)\s+(?:a\s+)?customers?\b|"
+        r"\b\d+\s*(?:months?|years?)\b",
+        re.IGNORECASE,
+    ),
+    "days_since_delivery_lte": re.compile(
+        r"\b(?:days?|weeks?|window|within|recent|since delivery|delivered)\b",
+        re.IGNORECASE,
+    ),
+}
+_TOPIC_LABELS = {
+    "amount_usd_lte": "an amount limit",
+    "tenure_months_gte": "customer tenure",
+    "days_since_delivery_lte": "a delivery time window",
+}
+
+
+def unrequested_question_topics(
+    reply_text: str, manager_texts: Sequence[str]
+) -> list[str]:
+    """Return labels of topics the reply asks about that the manager never raised.
+
+    Used by the agent graph's guard step, so the model cannot add conditions
+    (an amount cap, tenure, a window) the manager did not mention.
+    """
+    asked = {match.group(1) for match in CLARIFY_MARKER_PATTERN.finditer(reply_text)}
+    asked.update(
+        kind for kind, pattern in CLARIFY_PRESET_PATTERNS.items() if pattern.search(reply_text)
+    )
+    manager_text = "\n".join(manager_texts)
+    return [
+        _TOPIC_LABELS[kind]
+        for kind in sorted(asked)
+        if not _TOPIC_MENTION_PATTERNS[kind].search(manager_text)
+    ]
+
+
+def policy_name_error(name: str, policies_dir: Path = POLICIES_DIR) -> str | None:
+    """Return why ``name`` cannot be used for a new saved policy, or ``None``.
+
+    Names cannot contain a dot, so they never collide with the template or
+    example files in ``policies/``.
+    """
+    if not _POLICY_NAME_PATTERN.fullmatch(name or ""):
+        return (
+            "Use 1-50 characters: lowercase letters, digits, '-' or '_', "
+            "starting with a letter or digit."
+        )
+    if (policies_dir / f"{name}.json").exists():
+        return f"A policy named “{name}” already exists. Pick another name."
+    return None
+
+
+def save_policy_draft(
+    name: str, draft: Mapping[str, Any], policies_dir: Path = POLICIES_DIR
+) -> Path:
+    """Write a validated draft to ``policies/<name>.json``; never overwrite.
+
+    Saving is not activation: the file keeps ``status: "draft"`` and nothing
+    points live intake at it.
+    """
+    name_error = policy_name_error(name, policies_dir)
+    if name_error:
+        raise ValueError(name_error)
+    if draft.get("status") != "draft":
+        raise ValueError("Only drafts can be saved.")
+    schema_errors = policy_schema_errors(draft)
+    if schema_errors:
+        raise ValueError(" ".join(schema_errors))
+
+    policies_dir.mkdir(parents=True, exist_ok=True)
+    path = policies_dir / f"{name}.json"
+    # Mode "x" fails if the file appeared since the name check.
+    # _json_dumps keeps Decimal operands as JSON numbers so a reload still validates.
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(_json_dumps(draft))
+        handle.write("\n")
+    return path
 
 
 def apply_build_policy_result(
@@ -234,22 +484,15 @@ def execute_build_policy_arguments(
     )
 
 
-def _parse_int_field(row: Mapping[str, str], field: str) -> int | None:
-    raw = (row.get(field) or "").strip()
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
 def _row_matches_history_filters(row: Mapping[str, str], filters: Mapping[str, Any]) -> bool:
     """Return whether a history row matches optional query filters."""
+    # Descriptive field filter, not evaluate() approve_full; history_evidence owns that count (rails stay out).
     stated_reason = filters.get("stated_reason")
-    if stated_reason is not None and (row.get("stated_reason") or "") != str(stated_reason):
+    if stated_reason is not None and compare_policy_field("stated_reason", stated_reason, row) is not True:
         return False
 
     fraud_flag = filters.get("fraud_flag")
-    if fraud_flag is not None and (row.get("fraud_flag") or "") != str(fraud_flag):
+    if fraud_flag is not None and compare_policy_field("fraud_flag", fraud_flag, row) is not True:
         return False
 
     amount = parse_amount(row.get("amount_usd"))
@@ -261,30 +504,15 @@ def _row_matches_history_filters(row: Mapping[str, str], filters: Mapping[str, A
             return False
 
     if filters.get("tenure_months_gte") is not None:
-        value = _parse_int_field(row, "tenure_months")
-        try:
-            bound = int(filters["tenure_months_gte"])
-        except (TypeError, ValueError):
-            return False
-        if value is None or value < bound:
+        if compare_policy_field("tenure_months_gte", filters["tenure_months_gte"], row) is not True:
             return False
 
     if filters.get("days_since_delivery_lte") is not None:
-        value = _parse_int_field(row, "days_since_delivery")
-        try:
-            bound = int(filters["days_since_delivery_lte"])
-        except (TypeError, ValueError):
-            return False
-        if value is None or value > bound:
+        if compare_policy_field("days_since_delivery_lte", filters["days_since_delivery_lte"], row) is not True:
             return False
 
     if filters.get("days_since_delivery_gte") is not None:
-        value = _parse_int_field(row, "days_since_delivery")
-        try:
-            bound = int(filters["days_since_delivery_gte"])
-        except (TypeError, ValueError):
-            return False
-        if value is None or value < bound:
+        if compare_policy_field("days_since_delivery_gte", filters["days_since_delivery_gte"], row) is not True:
             return False
 
     return True
@@ -375,7 +603,7 @@ def format_preview_summary_for_manager(
     candidate = preview_summary.get("candidate") or {}
     delta = preview_summary.get("delta") or {}
     return (
-        "Local pending-cohort preview (aggregates only; not a refund or activation):\n"
+        "Pending requests this policy would match:\n"
         f"- Prior draft: {prior.get('approved_count', 0)} matches, "
         f"${prior.get('approved_total_usd', '0.00')}\n"
         f"- Candidate: {candidate.get('approved_count', 0)} matches, "
@@ -408,49 +636,10 @@ def tool_result_for_model(result: Mapping[str, Any]) -> dict[str, Any]:
         "assumptions",
         "cannot_express",
         "preview_summary",
+        "history_evidence",
         "errors",
     )
     return {key: result[key] for key in allowed if key in result}
-
-
-def collect_streamed_message(
-    stream: Any, on_text_delta: Callable[[str], None]
-) -> SimpleNamespace:
-    """Consume a streamed chat completion into a non-streamed-shaped message.
-
-    Text deltas are forwarded to ``on_text_delta`` as they arrive. Tool-call
-    fragments arrive split across chunks and are joined by their ``index``.
-    The return value has ``.content`` and ``.tool_calls`` (each with ``.id``,
-    ``.function.name``, ``.function.arguments``) like a non-streamed message.
-    """
-    content_parts: list[str] = []
-    calls: dict[int, dict[str, str]] = {}
-    for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        if delta.content:
-            content_parts.append(delta.content)
-            on_text_delta(delta.content)
-        for fragment in delta.tool_calls or []:
-            call = calls.setdefault(
-                fragment.index, {"id": "", "name": "", "arguments": ""}
-            )
-            if fragment.id:
-                call["id"] = fragment.id
-            if fragment.function and fragment.function.name:
-                call["name"] += fragment.function.name
-            if fragment.function and fragment.function.arguments:
-                call["arguments"] += fragment.function.arguments
-
-    tool_calls = [
-        SimpleNamespace(
-            id=call["id"],
-            function=SimpleNamespace(name=call["name"], arguments=call["arguments"]),
-        )
-        for _, call in sorted(calls.items())
-    ]
-    return SimpleNamespace(content="".join(content_parts), tool_calls=tool_calls)
 
 
 def assistant_text_from_tool_results(

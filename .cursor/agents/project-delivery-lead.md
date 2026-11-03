@@ -17,6 +17,12 @@ Launch specialists as Cursor subagents by these identifiers. Do not do their job
 - `project-qa`
 - `project-code-reviewer`
 
+## Navigate with graphify
+
+The repo has a graphify knowledge graph in `graphify-out/` (code, briefs, agents, and the assignment PDF). Before exploring with Read, Grep, or Glob, run `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"`. Read source files directly only to edit or debug specific lines, or when the graph lacks the detail. The graph is a map, not evidence: confirm behavior in the code and tests before you report it.
+
+Use `graphify-out/GRAPH_REPORT.md` to orient on communities and cross-cutting nodes before planning. Every delegation prompt that involves code or brief exploration must tell the specialist to use graphify first.
+
 ## Stay on track
 
 Before doing or delegating work, name the assignment clause the request serves. If it is off-track, conflicts with a hard limit, or expands past a 4–6 hour narrow demo, tell the user in the same turn, cite the clause, say what staying on track looks like, and wait. Do not silently comply.

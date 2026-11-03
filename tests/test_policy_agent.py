@@ -1,6 +1,7 @@
 """Offline tests for the Streamlit manager policy-agent host.
 
-Never calls the real OpenAI API. Clarification-before-tool is covered by
+Never calls a real model provider; a scripted LangChain chat model drives the
+LangGraph loop. Clarification-before-tool is covered by
 asserting system-instruction guidance (the host always registers
 ``build_policy``; the model is instructed not to call it while ambiguous).
 """
@@ -8,10 +9,17 @@ asserting system-instruction guidance (the host always registers
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from copy import deepcopy
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 from utils.policy import policy_agent
 
@@ -33,32 +41,163 @@ def _proposed_result(draft):
     }
 
 
-class _FakeFunction:
-    def __init__(self, name, arguments):
-        self.name = name
-        self.arguments = arguments
+class _ScriptedChatModel(BaseChatModel):
+    """LangChain chat model that replays scripted replies, for offline tests.
+
+    Records the tools it was bound to and the messages of every call.
+    """
+
+    replies: list[AIMessage]
+    bound_tools: list[Any] = Field(default_factory=list)
+    seen: list[list[Any]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = list(tools)
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=self.replies.pop(0))])
 
 
-class _FakeToolCall:
-    def __init__(self, call_id, name, arguments):
-        self.id = call_id
-        self.function = _FakeFunction(name, arguments)
+def _tool_call(name, args, call_id="call_1"):
+    return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
 
 
-class _FakeMessage:
-    def __init__(self, content=None, tool_calls=None):
-        self.content = content
-        self.tool_calls = tool_calls
+class SavePolicyDraftTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.policies_dir = Path(temp.name) / "policies"
+
+    def _draft(self):
+        draft = _template_draft()
+        draft["allow"] = [
+            {
+                "id": "changed_mind_14d",
+                "action": "approve_full",
+                "all_of": [
+                    {"when": {"stated_reason": "changed_mind", "days_since_delivery_lte": 14}}
+                ],
+            }
+        ]
+        return draft
+
+    def test_saves_valid_draft_as_named_json(self):
+        path = policy_agent.save_policy_draft("demo-1", self._draft(), self.policies_dir)
+        self.assertEqual(path, self.policies_dir / "demo-1.json")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), self._draft())
+
+    def test_existing_name_is_rejected_and_file_kept(self):
+        policy_agent.save_policy_draft("demo", self._draft(), self.policies_dir)
+        self.assertIn("already exists", policy_agent.policy_name_error("demo", self.policies_dir))
+        changed = self._draft()
+        changed["comment"] = "second"
+        with self.assertRaises(ValueError):
+            policy_agent.save_policy_draft("demo", changed, self.policies_dir)
+        saved = json.loads((self.policies_dir / "demo.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved, self._draft())
+
+    def test_bad_names_are_rejected(self):
+        for name in ("", "Demo", "../escape", "a b", "-lead", "x" * 51):
+            self.assertIsNotNone(policy_agent.policy_name_error(name, self.policies_dir), name)
+
+    def test_invalid_or_non_draft_policy_is_not_saved(self):
+        broken = self._draft()
+        broken["allow"][0]["all_of"][0]["when"]["stated_reason"] = ["wrong_item"]
+        live = self._draft()
+        live["status"] = "live"
+        for policy in (broken, live):
+            with self.assertRaises(ValueError):
+                policy_agent.save_policy_draft("demo", policy, self.policies_dir)
+        self.assertFalse(self.policies_dir.exists())
+
+    def test_saves_decimal_amount_as_json_number(self):
+        from decimal import Decimal
+
+        from utils.policy.policy_evaluator import policy_schema_errors
+
+        draft = self._draft()
+        draft["allow"][0]["all_of"][0]["when"]["amount_usd_lte"] = Decimal("49.50")
+        path = policy_agent.save_policy_draft("decimal-cap", draft, self.policies_dir)
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.endswith("\n"))
+        self.assertIn("49.50", text)
+        self.assertNotIn('"49.50"', text)
+        loaded = json.loads(text)
+        self.assertEqual(loaded["status"], "draft")
+        self.assertEqual(policy_schema_errors(loaded), [])
 
 
-class _FakeChoice:
-    def __init__(self, message):
-        self.message = message
+class PolicyConfirmationTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.policies_dir = Path(temp.name) / "policies"
 
+    def _draft(self, when):
+        draft = _template_draft()
+        draft["allow"] = [
+            {
+                "id": "small_good_customers",
+                "action": "approve_full",
+                "all_of": [{"when": when}],
+            }
+        ]
+        return draft
 
-class _FakeResponse:
-    def __init__(self, message):
-        self.choices = [_FakeChoice(message)]
+    def test_invented_tenure_blocks_and_stated_numbers_do_not(self):
+        messages = [
+            {"role": "user", "content": "Small stuff from good customers. Change of mind within 14 days."},
+            {"role": "user", "content": "Confirmed: “small stuff” means refunds of $30 or less."},
+        ]
+        blocked = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {
+                    "amount_usd_lte": 30,
+                    "tenure_months_gte": 6,
+                    "days_since_delivery_lte": 14,
+                }
+            ),
+            messages,
+        )
+        self.assertEqual([item["kind"] for item in blocked], ["tenure_months_gte"])
+
+        messages.append(
+            {"role": "user", "content": "Confirmed: customers for at least 12 months."}
+        )
+        clear = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {
+                    "amount_usd_lte": 30,
+                    "tenure_months_gte": 12,
+                    "days_since_delivery_lte": 14,
+                }
+            ),
+            messages,
+        )
+        self.assertEqual(clear, [])
+
+    def test_vague_phrases_do_not_require_a_threshold(self):
+        draft = self._draft({"amount_usd_lte": 30})
+        asked = [{"role": "user", "content": "Small stuff from good customers, $30."}]
+        self.assertEqual(policy_agent.policy_confirmation_blockers(draft, asked), [])
+
+    def test_suggested_name_comes_from_rule_ids_and_skips_taken_names(self):
+        draft = self._draft({"amount_usd_lte": 30})
+        self.assertEqual(
+            policy_agent.suggest_policy_name(draft, self.policies_dir),
+            "small-good-customers",
+        )
+        policy_agent.save_policy_draft("small-good-customers", draft, self.policies_dir)
+        self.assertEqual(
+            policy_agent.suggest_policy_name(draft, self.policies_dir),
+            "small-good-customers-2",
+        )
 
 
 class PolicyAgentHostTests(unittest.TestCase):
@@ -85,11 +224,15 @@ class PolicyAgentHostTests(unittest.TestCase):
         """Clarification-before-tool is prompt/system guidance (documented)."""
         system = policy_agent.build_system_message(_template_draft())
         collapsed = " ".join(system.split())
-        self.assertIn("Ask focused clarifying questions", collapsed)
+        self.assertIn("Deciding what to ask", collapsed)
+        self.assertIn("Do not add conditions the manager did not mention", collapsed)
+        self.assertIn("history_evidence", collapsed)
         self.assertIn("one clear ask", collapsed)
         self.assertIn("[[clarify:tenure_months_gte]]", collapsed)
-        self.assertIn("good customers", collapsed)
-        self.assertIn("small stuff", collapsed)
+        self.assertIn("are not automatically", collapsed)
+        self.assertIn("Call query_history for each plausible reading", collapsed)
+        self.assertIn("Picking error is not a stated reason", collapsed)
+        self.assertNotIn("picking error -> wrong_item", collapsed)
         self.assertIn("Never silently invent numeric values", collapsed)
         self.assertIn("Light chain of thought", collapsed)
         self.assertIn("Data dictionary", collapsed)
@@ -214,24 +357,22 @@ class PolicyAgentHostTests(unittest.TestCase):
         ]
         proposed = _proposed_result(candidate)
 
-        tool_call = _FakeToolCall(
-            "call_1",
-            "build_policy",
-            json.dumps({"candidate_policy": candidate, "assumptions": []}),
+        model = _ScriptedChatModel(
+            replies=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        _tool_call(
+                            "build_policy",
+                            {"candidate_policy": candidate, "assumptions": []},
+                        )
+                    ],
+                ),
+                AIMessage(content="Proposed a draft with aggregate preview only."),
+            ]
         )
-        first = _FakeResponse(_FakeMessage(content="", tool_calls=[tool_call]))
-        second = _FakeResponse(
-            _FakeMessage(
-                content="Proposed a draft with aggregate preview only.",
-                tool_calls=None,
-            )
-        )
-        client = MagicMock()
-        client.chat.completions.create.side_effect = [first, second]
 
         with patch.object(
-            policy_agent, "OPENAI_API_KEY", "test-key"
-        ), patch.object(
             policy_agent,
             "execute_registered_tool",
             return_value=proposed,
@@ -240,100 +381,231 @@ class PolicyAgentHostTests(unittest.TestCase):
                 user_text="changed_mind up to 25 dollars",
                 history=[],
                 current_draft=current,
-                client=client,
+                chat_model=model,
             )
 
         execute.assert_called_once()
         args, kwargs = execute.call_args
         self.assertEqual(args[0], "build_policy")
+        self.assertEqual(args[1]["candidate_policy"], candidate)
         self.assertEqual(args[2], current)
         self.assertTrue(turn["draft_updated"])
         self.assertEqual(turn["draft"]["comment"], "manager candidate")
         self.assertEqual(
             turn["preview_summary"]["candidate"]["approved_total_usd"], "10.00"
         )
+        self.assertEqual(
+            turn["assistant_text"], "Proposed a draft with aggregate preview only."
+        )
         provider_blob = json.dumps(turn["provider_messages"], default=str)
         self.assertNotIn("RF-SECRET", provider_blob)
         self.assertNotIn("SECRET_CUSTOMER_NOTE", provider_blob)
-        create_kwargs = client.chat.completions.create.call_args_list[0].kwargs
         self.assertEqual(
-            create_kwargs["tools"][0]["function"]["name"], "build_policy"
+            [tool["function"]["name"] for tool in model.bound_tools],
+            ["build_policy", "query_history"],
         )
-        self.assertEqual(len(create_kwargs["tools"]), 2)
+        # The second model call sees the tool result for the first call.
+        self.assertEqual(model.seen[1][-1].type, "tool")
+        self.assertEqual(model.seen[1][-1].tool_call_id, "call_1")
 
-    def test_streamed_turn_forwards_text_and_joins_split_tool_calls(self):
+    def test_streamed_turn_forwards_text_from_every_round(self):
         current = _template_draft()
         candidate = deepcopy(current)
         candidate["comment"] = "streamed candidate"
-        arguments = json.dumps({"candidate_policy": candidate})
-
-        def chunk(content=None, tool_calls=None):
-            delta = SimpleNamespace(content=content, tool_calls=tool_calls)
-            return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
-
-        def fragment(call_id=None, name=None, args=None):
-            return SimpleNamespace(
-                index=0,
-                id=call_id,
-                function=SimpleNamespace(name=name, arguments=args),
-            )
-
-        first_round = [
-            chunk(content="Checking "),
-            chunk(content="the numbers."),
-            chunk(tool_calls=[fragment("call_1", "build_policy", arguments[:10])]),
-            chunk(tool_calls=[fragment(args=arguments[10:])]),
-            SimpleNamespace(choices=[]),
-        ]
-        second_round = [chunk(content="Draft "), chunk(content="ready.")]
-        client = MagicMock()
-        client.chat.completions.create.side_effect = [
-            iter(first_round),
-            iter(second_round),
-        ]
+        model = _ScriptedChatModel(
+            replies=[
+                AIMessage(
+                    content="Checking the numbers.",
+                    tool_calls=[_tool_call("build_policy", {"candidate_policy": candidate})],
+                ),
+                AIMessage(content="Draft ready."),
+            ]
+        )
         deltas: list[str] = []
 
         with patch.object(
             policy_agent,
             "execute_registered_tool",
             return_value=_proposed_result(candidate),
-        ) as execute:
+        ):
             turn = policy_agent.run_policy_agent_turn(
                 user_text="stream it",
                 history=[],
                 current_draft=current,
-                client=client,
+                chat_model=model,
                 on_text_delta=deltas.append,
             )
 
-        self.assertEqual(execute.call_args.args[0], "build_policy")
-        self.assertEqual(json.loads(execute.call_args.args[1]), json.loads(arguments))
-        self.assertTrue(client.chat.completions.create.call_args.kwargs["stream"])
         self.assertEqual(
             turn["assistant_text"], "Checking the numbers.\n\nDraft ready."
         )
-        self.assertEqual("".join(deltas).strip(), turn["assistant_text"])
+        self.assertEqual("".join(deltas), turn["assistant_text"])
         self.assertEqual(turn["draft"]["comment"], "streamed candidate")
+
+    def test_guard_drops_question_about_topic_manager_never_raised(self):
+        model = _ScriptedChatModel(
+            replies=[
+                AIMessage(
+                    content="Any amount limit? $25, $30, $50?\n[[clarify:amount_usd_lte]]"
+                ),
+                AIMessage(content="Building it now as you described."),
+            ]
+        )
+        deltas: list[str] = []
+        resets: list[bool] = []
+        turn = policy_agent.run_policy_agent_turn(
+            user_text="Change of mind: refund in full within 14 days of delivery.",
+            history=[],
+            current_draft=_template_draft(),
+            chat_model=model,
+            on_text_delta=deltas.append,
+            on_text_reset=lambda: resets.append(True),
+        )
+        self.assertEqual(turn["assistant_text"], "Building it now as you described.")
+        self.assertEqual(resets, [True])
+        retry_prompt = model.seen[1][-1]
+        self.assertEqual(retry_prompt.type, "human")
+        self.assertIn("an amount limit", retry_prompt.content)
+        self.assertNotIn("amount limit?", json.dumps(turn["provider_messages"], default=str))
+
+    def test_guard_allows_question_about_topic_manager_raised_and_retries_once(self):
+        jumped = _ScriptedChatModel(
+            replies=[
+                AIMessage(content="What counts as small stuff: $25, $30, $50?"),
+                AIMessage(
+                    content="When you say small, do you mean the refund amount or the item size?"
+                ),
+            ]
+        )
+        turn = policy_agent.run_policy_agent_turn(
+            user_text="Small stuff goes through automatically.",
+            history=[],
+            current_draft=_template_draft(),
+            chat_model=jumped,
+        )
+        self.assertEqual(len(jumped.seen), 2)
+        self.assertIn("item size", turn["assistant_text"])
+
+        asked = AIMessage(content="What refund amount should count: $25, $30, $50?")
+        model = _ScriptedChatModel(replies=[asked])
+        turn = policy_agent.run_policy_agent_turn(
+            user_text="Cheap refunds should go through. I mean the cost.",
+            history=[],
+            current_draft=_template_draft(),
+            chat_model=model,
+        )
+        self.assertEqual(len(model.seen), 1)
+        self.assertIn("$25, $30, $50", turn["assistant_text"])
+
+        stubborn = _ScriptedChatModel(
+            replies=[
+                AIMessage(content="Tenure: 6, 12 or 24 months?"),
+                AIMessage(content="Tenure again: 6, 12 or 24 months?"),
+            ]
+        )
+        turn = policy_agent.run_policy_agent_turn(
+            user_text="Change of mind within 14 days.",
+            history=[],
+            current_draft=_template_draft(),
+            chat_model=stubborn,
+        )
+        self.assertEqual(len(stubborn.seen), 2)
+        self.assertEqual(turn["assistant_text"], "Tenure again: 6, 12 or 24 months?")
+
+    def test_unrequested_topics_reads_markers_presets_and_manager_words(self):
+        topics = policy_agent.unrequested_question_topics
+        self.assertEqual(
+            topics("[[clarify:amount_usd_lte]]", ["create a new policy for change of mind"]),
+            ["an amount limit"],
+        )
+        self.assertEqual(topics("6, 12, or 24 months?", ["sounds good"]), ["customer tenure"])
+        self.assertEqual(
+            topics("6, 12, or 24 months?", ["good customers only"]),
+            ["customer tenure"],
+        )
+        self.assertEqual(
+            topics("6, 12, or 24 months?", ["how long they have been a customer"]),
+            [],
+        )
+        self.assertEqual(topics("$25, $30, or $50?", ["refunds under $40"]), [])
+        self.assertEqual(topics("Is this what you want?", ["anything"]), [])
+
+    def test_tool_loop_stops_at_round_cap(self):
+        looping = [
+            AIMessage(
+                content="",
+                tool_calls=[_tool_call("query_history", {}, call_id=f"call_{index}")],
+            )
+            for index in range(10)
+        ]
+        model = _ScriptedChatModel(replies=looping)
+        turn = policy_agent.run_policy_agent_turn(
+            user_text="loop",
+            history=[],
+            current_draft=_template_draft(),
+            chat_model=model,
+            max_tool_rounds=2,
+        )
+        self.assertIn("maximum number of tool rounds", turn["assistant_text"])
+        self.assertFalse(turn["draft_updated"])
+
+    def test_provider_choice_needs_a_key_and_known_name(self):
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": ""}, clear=False):
+            self.assertFalse(policy_agent.llm_configured("anthropic"))
+            self.assertTrue(policy_agent.llm_configured("anthropic", api_key="k"))
+            self.assertIn("ANTHROPIC_API_KEY", policy_agent.offline_message("anthropic"))
+        self.assertFalse(policy_agent.llm_configured("mystery"))
+        self.assertEqual(
+            set(policy_agent.PROVIDERS), {"openai", "anthropic", "gemini"}
+        )
+
+    def test_instructions_build_before_the_page_asks_to_save(self):
+        instructions = policy_agent.SYSTEM_INSTRUCTIONS
+        self.assertIn("call build_policy right away to check", instructions)
+        self.assertIn('Only after build_policy returns "proposed"', instructions)
+        self.assertIn("Do not ask for a name", instructions)
+        self.assertNotIn("[[ready_to_build]]", instructions)
+
+    def test_instructions_offer_shared_clarification_presets(self):
+        from utils.policy.policy_agent_utils import CLARIFY_PRESET_VALUES
+
+        instructions = policy_agent.SYSTEM_INSTRUCTIONS
+        self.assertNotIn("__CLARIFY_PRESET_BULLETS__", instructions)
+        self.assertNotIn("__CLARIFY_AMOUNT_PRESETS__", instructions)
+        amounts = ", ".join(
+            f"${value}" for value in CLARIFY_PRESET_VALUES["amount_usd_lte"]
+        )
+        tenure_values = CLARIFY_PRESET_VALUES["tenure_months_gte"]
+        tenure = ", ".join(str(value) for value in tenure_values[:-1])
+        tenure = f"{tenure}, or {tenure_values[-1]}"
+        window_values = CLARIFY_PRESET_VALUES["days_since_delivery_lte"]
+        window = ", ".join(str(value) for value in window_values[:-1])
+        window = f"{window}, or {window_values[-1]}"
+        self.assertIn(f"{amounts}, or custom", instructions)
+        self.assertIn(f"{tenure} months, or custom", instructions)
+        self.assertIn(f"{window}\n    days, or custom", instructions)
 
     def test_mocked_cannot_express_preserves_draft_in_turn(self):
         current = _template_draft()
         before = deepcopy(current)
-        tool_call = _FakeToolCall(
-            "call_2",
-            "build_policy",
-            json.dumps(
-                {
-                    "candidate_policy": current,
-                    "cannot_express": ["Reject action unsupported."],
-                }
-            ),
+        model = _ScriptedChatModel(
+            replies=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        _tool_call(
+                            "build_policy",
+                            {
+                                "candidate_policy": current,
+                                "cannot_express": ["Reject action unsupported."],
+                            },
+                            call_id="call_2",
+                        )
+                    ],
+                ),
+                AIMessage(content="Cannot express reject in schema."),
+            ]
         )
-        first = _FakeResponse(_FakeMessage(content="", tool_calls=[tool_call]))
-        second = _FakeResponse(
-            _FakeMessage(content="Cannot express reject in schema.", tool_calls=None)
-        )
-        client = MagicMock()
-        client.chat.completions.create.side_effect = [first, second]
         cannot = {
             "status": "cannot_express",
             "assumptions": [],
@@ -341,8 +613,6 @@ class PolicyAgentHostTests(unittest.TestCase):
         }
 
         with patch.object(
-            policy_agent, "OPENAI_API_KEY", "test-key"
-        ), patch.object(
             policy_agent,
             "execute_registered_tool",
             return_value=cannot,
@@ -351,13 +621,14 @@ class PolicyAgentHostTests(unittest.TestCase):
                 user_text="Auto-reject late delivery",
                 history=[],
                 current_draft=current,
-                client=client,
+                chat_model=model,
             )
 
         self.assertFalse(turn["draft_updated"])
         self.assertEqual(turn["draft"], before)
 
     def test_query_history_returns_counts_for_filters(self):
+        from utils.data.data_processing import normalize_reason
         from utils.policy import policy_agent_utils as utils
 
         result = utils.query_history(
@@ -372,9 +643,75 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertLessEqual(len(result["sample_rows"]), 3)
         self.assertIn("disclaimer", result)
         for row in result["sample_rows"]:
-            self.assertEqual(row.get("stated_reason"), "changed_mind")
+            self.assertEqual(normalize_reason(row.get("stated_reason")), "changed_mind")
             self.assertNotIn("customer_note", row)
             self.assertNotIn("support_note", row)
+
+    def test_query_history_folds_aliases_and_rejects_negative_days(self):
+        from utils.policy import policy_agent_utils as utils
+
+        damaged = utils.query_history(
+            {
+                "stated_reason": "arrived_damaged",
+                "amount_usd_gt": "48",
+                "amount_usd_lte": "49",
+                "days_since_delivery_gte": 4,
+                "days_since_delivery_lte": 4,
+                "sample_limit": 5,
+            }
+        )
+        self.assertEqual(damaged["status"], "ok")
+        damaged_row = next(
+            row for row in damaged["sample_rows"] if row["request_id"] == "RF-2074"
+        )
+        self.assertEqual(damaged_row["stated_reason"], "damaged")
+        self.assertNotIn("customer_note", damaged_row)
+        self.assertNotIn("support_note", damaged_row)
+
+        alias_filter = utils.query_history(
+            {
+                "stated_reason": "damaged",
+                "amount_usd_gt": "48",
+                "amount_usd_lte": "49",
+                "days_since_delivery_gte": 4,
+                "days_since_delivery_lte": 4,
+            }
+        )
+        self.assertIn(
+            "RF-2074",
+            [row["request_id"] for row in alias_filter["sample_rows"]],
+        )
+
+        negative_days = utils.query_history(
+            {
+                "stated_reason": "wrong_size",
+                "amount_usd_gt": "32.99",
+                "amount_usd_lte": "33",
+                "tenure_months_gte": 26,
+                "days_since_delivery_lte": 14,
+            }
+        )
+        self.assertEqual(negative_days["match_count"], 0)
+        self.assertNotIn(
+            "RF-2139",
+            [row["request_id"] for row in negative_days["sample_rows"]],
+        )
+
+        clear_fraud = utils.query_history(
+            {
+                "fraud_flag": "no",
+                "stated_reason": "wrong_size",
+                "amount_usd_gt": "24.99",
+                "amount_usd_lte": "25",
+                "tenure_months_gte": 7,
+                "days_since_delivery_gte": 12,
+                "days_since_delivery_lte": 12,
+            }
+        )
+        fraud_row = next(
+            row for row in clear_fraud["sample_rows"] if row["request_id"] == "RF-2066"
+        )
+        self.assertEqual(fraud_row["fraud_flag"], "N")
 
     def test_ensure_session_defaults_initializes_template_draft(self):
         state: dict = {}
