@@ -11,7 +11,7 @@ import json
 import re
 from collections import Counter
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Sequence
 
@@ -251,13 +251,37 @@ def registered_tool_names() -> tuple[str, ...]:
     return (BUILD_POLICY_TOOL_NAME, QUERY_HISTORY_TOOL_NAME)
 
 
-_THRESHOLD_KINDS = {
-    "amount_usd_lte": "amount_usd_lte",
-    "amount_usd_gt": "amount_usd_lte",
-    "tenure_months_gte": "tenure_months_gte",
-    "days_since_delivery_lte": "days_since_delivery_lte",
-    "days_since_delivery_gte": "days_since_delivery_lte",
+_NUMBER = r"\d+(?:\.\d+)?"
+# Opposite operators stay separate. Amount phrases require "$" so a day count is not a cap.
+_THRESHOLD_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "amount_usd_lte": (
+        re.compile(rf"(?:up to|refunds of)\s*\$\s*({_NUMBER})", re.IGNORECASE),
+        re.compile(rf"\$\s*({_NUMBER})\s*or less", re.IGNORECASE),
+    ),
+    "amount_usd_gt": (
+        re.compile(rf"(?:over|more than)\s*\$\s*({_NUMBER})", re.IGNORECASE),
+    ),
+    "tenure_months_gte": (
+        re.compile(rf"at least\s*({_NUMBER})\s*months", re.IGNORECASE),
+    ),
+    "days_since_delivery_lte": (
+        re.compile(rf"within\s*({_NUMBER})\s*days", re.IGNORECASE),
+    ),
+    "days_since_delivery_gte": (
+        re.compile(rf"(?:at least|more than)\s*({_NUMBER})\s*days", re.IGNORECASE),
+    ),
 }
+# Canonical reason codes. Free-text aliases are not confirmation.
+_REASON_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("changed_mind", re.compile(r"change(?:d|\s+of)\s+mind", re.IGNORECASE)),
+    ("arrived_damaged", re.compile(r"arrived\s+damaged|\bdamaged\b", re.IGNORECASE)),
+    ("wrong_size", re.compile(r"wrong\s+size", re.IGNORECASE)),
+    ("wrong_item", re.compile(r"wrong\s+item", re.IGNORECASE)),
+    ("never_arrived", re.compile(r"never\s+arrived", re.IGNORECASE)),
+    ("late_delivery", re.compile(r"late\s+delivery", re.IGNORECASE)),
+)
+
+
 def _number_token(value: Any) -> str | None:
     """Render a threshold the way a manager would have typed it."""
     if isinstance(value, bool):
@@ -269,12 +293,34 @@ def _number_token(value: Any) -> str | None:
     return str(value)
 
 
-def _number_stated(user_text: str, value: Any) -> bool:
-    """Return whether the manager's own messages contain this threshold."""
+def _bound_thresholds(user_text: str) -> dict[str, list[Decimal]]:
+    """Return numbers her words bound to each threshold field.
+
+    A number counts only for the field the pattern names.
+    """
+    found: dict[str, list[Decimal]] = {field: [] for field in _THRESHOLD_PATTERNS}
+    for field, patterns in _THRESHOLD_PATTERNS.items():
+        for pattern in patterns:
+            for match in pattern.finditer(user_text):
+                try:
+                    found[field].append(Decimal(match.group(1)))
+                except InvalidOperation:
+                    continue
+    return found
+
+
+def _threshold_confirmed(
+    bound: Mapping[str, Sequence[Decimal]], field: str, value: Any
+) -> bool:
+    """Return whether this draft value was captured for this field."""
     token = _number_token(value)
     if token is None:
         return False
-    return re.search(rf"(?<!\d){re.escape(token)}(?!\d)", user_text) is not None
+    try:
+        wanted = Decimal(token)
+    except InvalidOperation:
+        return False
+    return any(wanted == captured for captured in bound.get(field, ()))
 
 
 def policy_confirmation_blockers(
@@ -282,44 +328,77 @@ def policy_confirmation_blockers(
 ) -> list[dict[str, str]]:
     """Return reasons a built draft must not be offered for approval yet.
 
-    The page uses this instead of trusting the model. A threshold in the draft
-    counts only if the manager stated or picked that number. A vague phrase
-    such as "good customers" or "small stuff" does not by itself require a
-    tenure or an amount.
+    The page uses this instead of trusting the model. A number counts only
+    for the field her words named. Every allow rule needs a reason she named.
+    Vague phrases still do not invent a tenure or an amount that the draft
+    does not already contain.
     """
     user_text = "\n".join(
         message.get("content") or ""
         for message in user_messages
         if message.get("role") == "user"
     )
+    bound = _bound_thresholds(user_text)
+    named_reasons = {
+        code for code, pattern in _REASON_PATTERNS if pattern.search(user_text)
+    }
     blockers: list[dict[str, str]] = []
     seen: set[str] = set()
     for rule in draft.get("allow") or []:
         if not isinstance(rule, Mapping):
             continue
+        rule_reasons: list[str] = []
         for group in rule.get("all_of") or []:
             conditions = group.get("when") if isinstance(group, Mapping) else None
             if not isinstance(conditions, Mapping):
                 continue
-            for field, kind in _THRESHOLD_KINDS.items():
-                if field not in conditions or kind in seen:
+            for field in _THRESHOLD_PATTERNS:
+                if field not in conditions or field in seen:
                     continue
-                if _number_stated(user_text, conditions[field]):
+                if _threshold_confirmed(bound, field, conditions[field]):
                     continue
-                seen.add(kind)
+                seen.add(field)
                 blockers.append(
-                    {"kind": kind, "detail": _unconfirmed_detail(kind, conditions[field])}
+                    {
+                        "kind": field,
+                        "detail": _unconfirmed_detail(field, conditions[field]),
+                    }
                 )
+            reason = conditions.get("stated_reason")
+            if isinstance(reason, str) and reason:
+                rule_reasons.append(reason)
+        # Block when this rule has no reason she named. One stated_reason blocker is enough.
+        if "stated_reason" in seen or any(reason in named_reasons for reason in rule_reasons):
+            continue
+        seen.add("stated_reason")
+        shown = next(
+            (reason for reason in rule_reasons if reason not in named_reasons),
+            "missing",
+        )
+        blockers.append(
+            {"kind": "stated_reason", "detail": _unconfirmed_detail("stated_reason", shown)}
+        )
     return blockers
 
 
-def _unconfirmed_detail(kind: str, value: Any) -> str:
+def _unconfirmed_detail(field: str, value: Any) -> str:
+    """Name the draft field she has not confirmed in her own words."""
     shown = _number_token(value) or value
-    if kind == "amount_usd_lte":
-        return f"This draft uses a ${shown} amount you have not chosen."
-    if kind == "tenure_months_gte":
-        return f"This draft uses {shown} months of tenure, which you have not chosen."
-    return f"This draft uses a {shown}-day window you have not chosen."
+    if field == "amount_usd_lte":
+        return f"This draft uses up to ${shown}. You have not said up to ${shown}."
+    if field == "amount_usd_gt":
+        return f"This draft uses over ${shown}. You have not said over ${shown}."
+    if field == "tenure_months_gte":
+        return (
+            f"This draft uses {shown} months of tenure. You have not said {shown} months."
+        )
+    if field == "days_since_delivery_lte":
+        return f"This draft uses within {shown} days. You have not said within {shown} days."
+    if field == "days_since_delivery_gte":
+        return (
+            f"This draft uses at least {shown} days. You have not said at least {shown} days."
+        )
+    return f"This draft uses the reason {shown}, which you have not named."
 
 
 def suggest_policy_name(

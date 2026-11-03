@@ -188,12 +188,14 @@ class PolicyConfirmationTests(unittest.TestCase):
 
     def test_invented_tenure_blocks_and_stated_numbers_do_not(self):
         messages = [
-            {"role": "user", "content": "Small stuff from good customers. Change of mind within 14 days."},
-            {"role": "user", "content": "Confirmed: “small stuff” means refunds of $30 or less."},
+            {"role": "user", "content": "Change of mind within 14 days"},
+            {"role": "assistant", "content": "Confirmed: customers for at least 6 months."},
+            {"role": "user", "content": "Confirmed: refunds of $30 or less."},
         ]
         blocked = policy_agent.policy_confirmation_blockers(
             self._draft(
                 {
+                    "stated_reason": "changed_mind",
                     "amount_usd_lte": 30,
                     "tenure_months_gte": 6,
                     "days_since_delivery_lte": 14,
@@ -202,6 +204,10 @@ class PolicyConfirmationTests(unittest.TestCase):
             messages,
         )
         self.assertEqual([item["kind"] for item in blocked], ["tenure_months_gte"])
+        self.assertEqual(
+            blocked[0]["detail"],
+            "This draft uses 6 months of tenure. You have not said 6 months.",
+        )
 
         messages.append(
             {"role": "user", "content": "Confirmed: customers for at least 12 months."}
@@ -209,6 +215,7 @@ class PolicyConfirmationTests(unittest.TestCase):
         clear = policy_agent.policy_confirmation_blockers(
             self._draft(
                 {
+                    "stated_reason": "changed_mind",
                     "amount_usd_lte": 30,
                     "tenure_months_gte": 12,
                     "days_since_delivery_lte": 14,
@@ -217,11 +224,169 @@ class PolicyConfirmationTests(unittest.TestCase):
             messages,
         )
         self.assertEqual(clear, [])
+        # 30 and 30.0 are the same threshold. 14.0 does not become a different field.
+        same_number = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {
+                    "stated_reason": "changed_mind",
+                    "amount_usd_lte": 30.0,
+                    "tenure_months_gte": 12,
+                    "days_since_delivery_lte": 14.0,
+                }
+            ),
+            messages,
+        )
+        self.assertEqual(same_number, [])
 
     def test_vague_phrases_do_not_require_a_threshold(self):
-        draft = self._draft({"amount_usd_lte": 30})
-        asked = [{"role": "user", "content": "Small stuff from good customers, $30."}]
+        draft = self._draft(
+            {"stated_reason": "changed_mind", "amount_usd_lte": 30}
+        )
+        asked = [
+            {
+                "role": "user",
+                "content": "Changed mind. Small stuff from good customers, up to $30.",
+            }
+        ]
         self.assertEqual(policy_agent.policy_confirmation_blockers(draft, asked), [])
+
+    def test_same_digits_do_not_confirm_another_field_or_reason(self):
+        sentence = [
+            {"role": "user", "content": "changed mind within 14 days, up to $40"}
+        ]
+        blocked = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {
+                    "stated_reason": "arrived_damaged",
+                    "tenure_months_gte": 14,
+                    "amount_usd_gt": 40,
+                    "days_since_delivery_gte": 14,
+                }
+            ),
+            sentence,
+        )
+        self.assertEqual(
+            {item["kind"] for item in blocked},
+            {
+                "tenure_months_gte",
+                "amount_usd_gt",
+                "days_since_delivery_gte",
+                "stated_reason",
+            },
+        )
+        details = {item["kind"]: item["detail"] for item in blocked}
+        self.assertEqual(
+            details["amount_usd_gt"],
+            "This draft uses over $40. You have not said over $40.",
+        )
+        self.assertEqual(
+            details["stated_reason"],
+            "This draft uses the reason arrived_damaged, which you have not named.",
+        )
+
+        draft = self._draft(
+            {
+                "stated_reason": "changed_mind",
+                "amount_usd_lte": 40,
+                "days_since_delivery_lte": 14,
+            }
+        )
+        draft["allow"].append(
+            {
+                "id": "wrong_item_window",
+                "action": "approve_full",
+                "all_of": [
+                    {
+                        "when": {
+                            "stated_reason": "wrong_item",
+                            "amount_usd_lte": 40,
+                            "days_since_delivery_lte": 14,
+                        }
+                    }
+                ],
+            }
+        )
+        extra_rule = policy_agent.policy_confirmation_blockers(draft, sentence)
+        self.assertEqual([item["kind"] for item in extra_rule], ["stated_reason"])
+        self.assertEqual(
+            extra_rule[0]["detail"],
+            "This draft uses the reason wrong_item, which you have not named.",
+        )
+        missing_reason = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {"amount_usd_lte": 40, "days_since_delivery_lte": 14}
+            ),
+            sentence,
+        )
+        self.assertEqual([item["kind"] for item in missing_reason], ["stated_reason"])
+
+    def test_bound_sentence_clears_matching_allow_rule(self):
+        clear = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {
+                    "stated_reason": "changed_mind",
+                    "days_since_delivery_lte": 14,
+                    "amount_usd_lte": 40,
+                }
+            ),
+            [{"role": "user", "content": "changed mind within 14 days, up to $40"}],
+        )
+        self.assertEqual(clear, [])
+
+    def test_bare_dollar_does_not_confirm_amount_cap(self):
+        blocked = policy_agent.policy_confirmation_blockers(
+            self._draft({"stated_reason": "changed_mind", "amount_usd_lte": 30}),
+            [
+                {"role": "user", "content": "changed mind"},
+                {"role": "user", "content": "$30"},
+            ],
+        )
+        self.assertEqual([item["kind"] for item in blocked], ["amount_usd_lte"])
+        self.assertEqual(
+            blocked[0]["detail"],
+            "This draft uses up to $30. You have not said up to $30.",
+        )
+
+    def test_day_counts_are_not_dollar_amounts(self):
+        more_than_days = [{"role": "user", "content": "more than 14 days"}]
+        days_only = policy_agent.policy_confirmation_blockers(
+            self._draft({"days_since_delivery_gte": 14}),
+            more_than_days,
+        )
+        self.assertNotIn("days_since_delivery_gte", [item["kind"] for item in days_only])
+        mixed = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {"days_since_delivery_gte": 14, "amount_usd_gt": 14}
+            ),
+            more_than_days,
+        )
+        mixed_kinds = [item["kind"] for item in mixed]
+        self.assertNotIn("days_since_delivery_gte", mixed_kinds)
+        self.assertIn("amount_usd_gt", mixed_kinds)
+
+        up_to_days = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {"amount_usd_lte": 14, "days_since_delivery_lte": 14}
+            ),
+            [{"role": "user", "content": "up to 14 days"}],
+        )
+        up_to_kinds = [item["kind"] for item in up_to_days]
+        self.assertIn("amount_usd_lte", up_to_kinds)
+        self.assertIn("days_since_delivery_lte", up_to_kinds)
+
+        for text in ("more than $40", "over $40"):
+            confirmed = policy_agent.policy_confirmation_blockers(
+                self._draft({"amount_usd_gt": 40}),
+                [{"role": "user", "content": text}],
+            )
+            self.assertNotIn("amount_usd_gt", [item["kind"] for item in confirmed])
+
+        for text in ("up to $40", "refunds of $40 or less"):
+            confirmed = policy_agent.policy_confirmation_blockers(
+                self._draft({"amount_usd_lte": 40}),
+                [{"role": "user", "content": text}],
+            )
+            self.assertNotIn("amount_usd_lte", [item["kind"] for item in confirmed])
 
     def test_suggested_name_comes_from_rule_ids_and_skips_taken_names(self):
         draft = self._draft({"amount_usd_lte": 30})

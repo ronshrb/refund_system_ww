@@ -823,3 +823,21 @@ Scope: independently review the approved Streamlit handoff, current stateless ad
 - File-safety evidence: the adapter has no write path to source CSVs or policy template/example/live files, and the focused tests contain no byte-snapshot assertions for those artifacts. A before/after hash attempt could not read `history.csv`, `pending.csv`, or `policy_notes.csv` because Windows reported that each was in use by another process. Therefore byte-for-byte unchanged status is not independently established by this run. The `policy/` directory contains the template and example only; no separate live policy file is present.
 - Agent and both prompt files identify `build_policy` as registered by the Streamlit host and state that prompt/agent files do not configure a provider/runtime. No Streamlit application or function-tool registration/invocation test is present. Registration, session-state ownership/update-on-`proposed`, and provider/runtime behavior remain not implemented or tested; these acceptance checks are still pending.
 - Remaining limitations: this focused suite verifies the local adapter only. It does not establish policy correctness, production readiness, or completion of the manager journey. Task remains `in-progress`.
+
+### Evidence / results — field-bound save offer (2026-11-03)
+
+Owner: project-engineer. Task overall stays `in-progress`.
+
+The save offer now waits until each draft number was bound to the field the manager named, and each allow rule uses a reason she named. Opposite operators are not the same kind. Assistant text does not confirm. Quick pick stays on the three preset kinds; `stated_reason`, `amount_usd_gt`, and `days_since_delivery_gte` show the blocker text only, because those buttons would write a cap or a within-N-days sentence. Saving a draft still does not move the live pointer. The model does not activate policy.
+
+Exact command from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_policy_agent.PolicyConfirmationTests
+```
+
+Observed: `Ran 7 tests in 0.007s` — `OK`.
+
+Amount phrases require a `$`. "more than 14 days" confirms at least 14 days and does not confirm an amount over $14. "up to 14 days" does not confirm a cap or a within-N-days window. "more than $40", "over $40", "up to $40", and "refunds of $40 or less" still confirm the matching amount field. `$N or less` is unchanged.
+
+Limitation: free-text phrasing outside the patterns above is not treated as confirmation. A bare `$30`, or a number said for a different field, does not clear the draft.

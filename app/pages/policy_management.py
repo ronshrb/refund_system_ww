@@ -186,10 +186,9 @@ def _run_manager_turn(user_text: str) -> None:
 
     messages.append({"role": "assistant", "content": turn["assistant_text"]})
 
-    # The page, not the model, decides what happens after a build. A draft is
-    # offered for approval only when every threshold in it was stated by the
-    # manager. Otherwise the working draft stays as it was and a pick list
-    # asks for the missing value.
+    # The page, not the model, decides what happens after a build. The offer
+    # waits until each number is bound to the field she named and each allow
+    # rule uses a reason she named. Otherwise the working draft stays as it was.
     st.session_state[_SESSION_NAME_STEP_KEY] = False
     if not turn["draft_updated"]:
         st.session_state[_SESSION_PROPOSAL_KEY] = None
@@ -563,44 +562,48 @@ def _render_policy_builder() -> None:
                     _save_proposal(name)
 
     blocker = st.session_state[_SESSION_BLOCKER_KEY]
-    clarify_kind = (
-        blocker["kind"]
-        if blocker
-        else _pending_clarify_kind(messages, st.session_state[_SESSION_CONFIRMED_KEY])
-    )
-    if clarify_kind and policy_agent.llm_configured() and st.session_state[_SESSION_PROPOSAL_KEY] is None:
-        st.subheader("Quick pick")
-        if blocker:
-            st.info(blocker["detail"])
-        _ask_text = blocker["detail"] if blocker else _latest_assistant_text(messages)
-        _parsed = None if blocker else parse_clarify_marker(_ask_text)
-        _values = (
-            _parsed["values"]
-            if _parsed and _parsed["values"]
-            else CLARIFY_PRESET_VALUES[clarify_kind]
+    # No preset list for these kinds. A button would confirm a cap or a within-N-days window.
+    if blocker and blocker["kind"] not in CLARIFY_PRESET_VALUES:
+        st.info(blocker["detail"])
+    else:
+        clarify_kind = (
+            blocker["kind"]
+            if blocker
+            else _pending_clarify_kind(messages, st.session_state[_SESSION_CONFIRMED_KEY])
         )
-        if _parsed and _parsed["topic"]:
-            st.caption(
-                f"{_parsed['topic']}. Choose one of these or enter a custom value — "
-                "one clear answer so we do not invent a threshold."
+        if clarify_kind and policy_agent.llm_configured() and st.session_state[_SESSION_PROPOSAL_KEY] is None:
+            st.subheader("Quick pick")
+            if blocker:
+                st.info(blocker["detail"])
+            _ask_text = blocker["detail"] if blocker else _latest_assistant_text(messages)
+            _parsed = None if blocker else parse_clarify_marker(_ask_text)
+            _values = (
+                _parsed["values"]
+                if _parsed and _parsed["values"]
+                else CLARIFY_PRESET_VALUES[clarify_kind]
             )
-        else:
-            st.caption(clarify_pick_caption(clarify_kind, _ask_text))
-        cols = st.columns(len(_values) + 1)
-        for index, (label, value) in enumerate(_quick_pick_presets(clarify_kind, _values)):
-            if cols[index].button(label, key=f"clarify_preset_{clarify_kind}_{value}"):
-                _confirm_pick(clarify_kind, value)
+            if _parsed and _parsed["topic"]:
+                st.caption(
+                    f"{_parsed['topic']}. Choose one of these or enter a custom value — "
+                    "one clear answer so we do not invent a threshold."
+                )
+            else:
+                st.caption(clarify_pick_caption(clarify_kind, _ask_text))
+            cols = st.columns(len(_values) + 1)
+            for index, (label, value) in enumerate(_quick_pick_presets(clarify_kind, _values)):
+                if cols[index].button(label, key=f"clarify_preset_{clarify_kind}_{value}"):
+                    _confirm_pick(clarify_kind, value)
 
-        with cols[-1]:
-            custom = st.number_input(
-                "Custom",
-                min_value=0,
-                step=1,
-                value=0,
-                key=f"clarify_custom_{clarify_kind}",
-            )
-            if st.button("Use custom", key=f"clarify_custom_btn_{clarify_kind}"):
-                _confirm_pick(clarify_kind, int(custom))
+            with cols[-1]:
+                custom = st.number_input(
+                    "Custom",
+                    min_value=0,
+                    step=1,
+                    value=0,
+                    key=f"clarify_custom_{clarify_kind}",
+                )
+                if st.button("Use custom", key=f"clarify_custom_btn_{clarify_kind}"):
+                    _confirm_pick(clarify_kind, int(custom))
 
     prompt = st.chat_input("Describe a policy change…")
     if prompt:
