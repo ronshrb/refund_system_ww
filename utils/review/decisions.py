@@ -120,17 +120,21 @@ def record_auto_approval(
     request_id: str,
     amount: Decimal | None,
     outcome_note: str,
+    matched_rule: str,
     policy_file: str | None,
     clock: Callable[[], datetime] | None = None,
 ) -> tuple[dict, bool]:
     """Record one simulated auto ``approve_full`` decision.
 
-    ``decided_by`` is ``auto``. ``matched_rule`` is stored as None. The
-    outcome note is the review agent's validation note, also stored as
-    ``note``. Customer and support notes are not stored. A missing note or a
-    note longer than 280 characters raises ``DecisionLogError`` and writes
-    nothing. A second call for the same id does not write.
+    ``decided_by`` is ``auto``. ``matched_rule`` is the allow-rule id from
+    ``evaluate_live``. The outcome note is that rule's plain sentence, also
+    stored as ``note``. Customer and support notes are not stored. A missing
+    rule id, a missing note, or a note longer than 280 characters raises
+    ``DecisionLogError`` and writes nothing. A second call for the same id
+    does not write.
     """
+    if not isinstance(matched_rule, str) or not matched_rule.strip():
+        raise DecisionLogError("The matched rule is missing. Nothing was decided.")
     cleaned_note, note_error = _clean_note(outcome_note)
     # An empty or over-long note is not an approval. Do not truncate it.
     if note_error is not None or not cleaned_note:
@@ -143,7 +147,7 @@ def record_auto_approval(
         amount=_decimal_text(amount),
         note=cleaned_note,
         decided_by="auto",
-        matched_rule=None,
+        matched_rule=matched_rule.strip(),
         policy_file=_policy_file_name(policy_file),
         clock=clock,
     )
@@ -208,7 +212,7 @@ def record_reviewer_decision(
         policy_file=_policy_file_name(policy_file),
         clock=clock,
     )
-    # Neither human nor auto records keep a matched rule. The filled note is the outcome note.
+    # A reviewer decision does not store a matched rule. The note is the outcome note.
     record["matched_rule"] = None
     record["outcome_note"] = cleaned_note
     try:

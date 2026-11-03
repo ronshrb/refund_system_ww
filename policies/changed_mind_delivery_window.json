@@ -2,6 +2,7 @@
   "version": "test-changed-mind-delivery-window",
   "status": "test",
   "comment": "Synthetic test fixture only; not approved policy. Exercises a bounded changed_mind delivery window with test values.",
+  "summary": "A full refund is auto-approved when any of these is true. Changed mind, delivered at least 5 days ago, delivered within 9 days, amount $31.25 or less, no fraud flag.",
   "allow": [
     {
       "id": "synthetic-changed-mind-delivery-window",

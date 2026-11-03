@@ -34,6 +34,12 @@ _REASON_SENTENCES = {
     "request_already_paid": "This request id is already in the local simulated paid set.",
     "no_allow_rule_matched": "No allow rule in the live policy matched this request.",
     "review_agent_held": "The review agent held this request, so it was not auto-approved.",
+    "review_note_hold": (
+        "A manager note on this match says a person should handle it. This is not a decision."
+    ),
+    "checkup_incomplete": (
+        "The note check did not finish. A person needs to decide."
+    ),
     "possible_repeat": (
         "Another request has the same customer, amount, and category, "
         "so this was not auto-approved."

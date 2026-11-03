@@ -22,6 +22,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
 from utils.policy import policy_agent
+from utils.policy.live_policy import summarize_policy
 
 
 def _template_draft():
@@ -98,10 +99,18 @@ class SavePolicyDraftTests(unittest.TestCase):
         ]
         return draft
 
+    def _with_stored_summary(self, draft):
+        expected = dict(draft)
+        expected["summary"] = summarize_policy(draft)
+        return expected
+
     def test_saves_valid_draft_as_named_json(self):
         path = policy_agent.save_policy_draft("demo-1", self._draft(), self.policies_dir)
         self.assertEqual(path, self.policies_dir / "demo-1.json")
-        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), self._draft())
+        self.assertEqual(
+            json.loads(path.read_text(encoding="utf-8")),
+            self._with_stored_summary(self._draft()),
+        )
 
     def test_existing_name_is_rejected_and_file_kept(self):
         policy_agent.save_policy_draft("demo", self._draft(), self.policies_dir)
@@ -111,7 +120,7 @@ class SavePolicyDraftTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy_agent.save_policy_draft("demo", changed, self.policies_dir)
         saved = json.loads((self.policies_dir / "demo.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved, self._draft())
+        self.assertEqual(saved, self._with_stored_summary(self._draft()))
 
     def test_bad_names_are_rejected(self):
         for name in ("", "Demo", "../escape", "a b", "-lead", "x" * 51):
@@ -142,6 +151,22 @@ class SavePolicyDraftTests(unittest.TestCase):
         loaded = json.loads(text)
         self.assertEqual(loaded["status"], "draft")
         self.assertEqual(policy_schema_errors(loaded), [])
+
+    def test_save_writes_summary_from_rules_and_does_not_touch_live_pointer(self):
+        draft = self._draft()
+        draft["summary"] = "Model wrote this. amount_usd_lte should not survive."
+        pointer = Path(__file__).resolve().parents[1] / "policies" / "live_pointer.json"
+        before = pointer.read_bytes()
+
+        path = policy_agent.save_policy_draft("summarized", draft, self.policies_dir)
+
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "draft")
+        self.assertEqual(saved["summary"], summarize_policy(draft))
+        self.assertNotIn("amount_usd_lte", saved["summary"])
+        self.assertNotEqual(saved["summary"], draft["summary"])
+        self.assertFalse((self.policies_dir / "live_pointer.json").exists())
+        self.assertEqual(pointer.read_bytes(), before)
 
 
 class PolicyConfirmationTests(unittest.TestCase):

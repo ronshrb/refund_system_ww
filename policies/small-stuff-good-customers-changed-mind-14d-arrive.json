@@ -2,6 +2,7 @@
   "version": 1,
   "status": "draft",
   "comment": "",
+  "summary": "A full refund is auto-approved when any of these is true. Amount $25 or less. Changed mind, delivered within 14 days. Arrived damaged, amount over $50. Wrong item.",
   "allow": [
     {
       "id": "small_stuff_good_customers",

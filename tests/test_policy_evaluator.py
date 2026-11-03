@@ -60,6 +60,20 @@ class PolicySchemaErrorTests(unittest.TestCase):
         self.assertEqual(policy_schema_errors(policy), [])
         self.assertTrue(validate_policy(policy))
 
+    def test_summary_string_is_optional_and_non_string_is_rejected(self):
+        policy = make_policy({"stated_reason": "changed_mind"})
+        self.assertEqual(policy_schema_errors(policy), [])
+
+        policy["summary"] = ""
+        self.assertEqual(policy_schema_errors(policy), [])
+        policy["summary"] = "A full refund is auto-approved when any of these is true."
+        self.assertTrue(validate_policy(policy))
+
+        policy["summary"] = ["not a string"]
+        error = policy_schema_errors(policy)[0]
+        self.assertIn("summary", error)
+        self.assertFalse(validate_policy(policy))
+
     def test_reason_list_names_the_condition_and_one_rule_per_reason_fix(self):
         policy = make_policy({"stated_reason": ["wrong_item", "arrived_damaged"]})
         errors = policy_schema_errors(policy)

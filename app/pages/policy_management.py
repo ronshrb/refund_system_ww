@@ -28,8 +28,11 @@ from utils.policy.live_policy import (
     historical_auto_approvals,
     history_outcome_rates,
     list_policy_files,
+    live_file_select_index,
     make_live,
+    make_live_button_disabled,
     preview_auto_approvals,
+    read_live_policy,
 )
 from utils.policy.policy_agent_utils import (
     CLARIFY_MARKER_PATTERN,
@@ -226,6 +229,19 @@ def _load_candidate(file_name: str):
         return None, "This file is not a usable policy. Nothing would auto-approve."
 
 
+def _stored_summary_text(policy) -> str:
+    """Return the summary stored on a parsed policy file.
+
+    Display only. A missing or blank field is not filled in here.
+    """
+    if not isinstance(policy, dict):
+        return "This file has no summary."
+    summary = policy.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary
+    return "This file has no summary."
+
+
 def _percent_label(value: float | None) -> str:
     if value is None:
         return "—"
@@ -380,23 +396,35 @@ def _render_policy_picker() -> None:
     """Select and preview a policy. Only the button writes the live pointer."""
     files = list_policy_files()
     history_rows, history_error = _history_rows()
+    live = read_live_policy()
+    live_file = live["file"] if live else None
     selected = None
     compare_with = _NO_COMPARE
+    candidate = None
+    candidate_error = None
     if not files:
         st.warning("No policy files in policies/.")
     else:
+        names = [item["file"] for item in files]
         file_col, compare_col = st.columns(2)
         with file_col:
+            # index= is the first-open default. Do not also assign the widget key.
             selected = st.selectbox(
                 "Policy file",
-                options=[item["file"] for item in files],
+                options=names,
+                index=live_file_select_index(names, live_file),
                 format_func=lambda name: _policy_choice_label(files, name),
                 key="policy_picker_selection",
             )
+            candidate, candidate_error = _load_candidate(selected)
+            st.markdown(_markdown_safe(_stored_summary_text(candidate)))
+            # Already-live stays disabled, and the click guard does not write the pointer.
+            already_live = make_live_button_disabled(selected, live_file)
             make_clicked = st.button(
                 "Make this the live policy",
                 type="primary",
                 key="make_this_the_live_policy",
+                disabled=already_live,
             )
         with compare_col:
             compare_with = st.selectbox(
@@ -405,18 +433,13 @@ def _render_policy_picker() -> None:
                 format_func=lambda name: _policy_choice_label(files, name),
                 key="policy_picker_compare",
             )
-        if selected and make_clicked:
+        if selected and make_clicked and not already_live:
             try:
                 make_live(selected)
             except (OSError, ValueError) as error:
                 st.error(f"Not made live: {error}")
             else:
                 st.rerun()
-
-    candidate = None
-    candidate_error = None
-    if selected:
-        candidate, candidate_error = _load_candidate(selected)
 
     candidate_matches = []
     if candidate is not None and history_rows is not None:

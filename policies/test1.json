@@ -2,6 +2,7 @@
   "version": 1,
   "status": "draft",
   "comment": "Template only. No auto-approval rules are configured; requests remain in review.",
+  "summary": "A full refund is auto-approved when any of these is true. Amount $30 or less, customer for at least 6 months. Changed mind, delivered within 14 days. Wrong item, delivered within 14 days.",
   "allow": [
     {
       "id": "small_stuff_good_customers",

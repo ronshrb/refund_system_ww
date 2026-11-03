@@ -129,6 +129,28 @@ def read_live_policy(policies_dir: Path | None = None) -> dict | None:
     return {"policy": policy, "file": file_name}
 
 
+def live_file_select_index(file_names: list[str], live_file: str | None) -> int:
+    """Return the Policy Picker index for the live file, or 0.
+
+    ``live_file`` is the name from a usable live policy. None, a blank, or a
+    name that is not in ``file_names`` keeps the first option.
+    """
+    if live_file and live_file in file_names:
+        return file_names.index(live_file)
+    return 0
+
+
+def make_live_button_disabled(selected_file: str | None, live_file: str | None) -> bool:
+    """Return whether Make live should stay disabled.
+
+    Disabled only when the selected file is already the usable live file.
+    No usable live file leaves the button enabled.
+    """
+    if not live_file:
+        return False
+    return selected_file == live_file
+
+
 def make_live(file_name: str, *, policies_dir: Path | None = None) -> dict[str, str]:
     """Point the live pointer at one listed policy file.
 
@@ -181,6 +203,20 @@ def explain_rule(rule) -> str:
         return "No auto-approve conditions."
     text = ", ".join(phrases)
     return text[0].upper() + text[1:] + "."
+
+
+def summarize_policy(policy) -> str:
+    """One paragraph of the allow rules, in the same words as ``explain_rule``.
+
+    Describes only allow rules. Review notes are not payment rules and are
+    not mentioned. Operator keys are not included. An empty or missing allow
+    list says that no rule auto-approves and a person decides.
+    """
+    allow = policy.get("allow") if isinstance(policy, Mapping) else None
+    if not isinstance(allow, list) or not allow:
+        return "No rule auto-approves a refund, so a person decides."
+    cases = " ".join(explain_rule(rule) for rule in allow)
+    return f"A full refund is auto-approved when any of these is true. {cases}"
 
 
 def history_outcome_rates(policy, request_rows) -> dict[str, int | float | Decimal | None]:

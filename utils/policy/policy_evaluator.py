@@ -8,8 +8,17 @@ from numbers import Integral
 from utils.data.data_processing import REASONS, normalize_reason, parse_amount
 
 
-# review_notes and rule_notes are reviewer guidance. Neither is an allow rule.
-_POLICY_KEYS = {"version", "status", "comment", "allow", "review_notes", "rule_notes"}
+# review_notes and rule_notes are reviewer guidance. summary is picker text.
+# None of them is an allow rule.
+_POLICY_KEYS = {
+    "version",
+    "status",
+    "comment",
+    "summary",
+    "allow",
+    "review_notes",
+    "rule_notes",
+}
 _REVIEW_NOTE_KEYS = {"reason", "text"}
 _RULE_NOTE_KEYS = {"id", "text"}
 _REVIEW_REASONS = REASONS | {"general"}
@@ -98,6 +107,10 @@ def policy_schema_errors(policy):
         return ["'status' must be a string."]
     if "comment" in policy and not isinstance(policy["comment"], str):
         return ["'comment' must be a string."]
+    # Picker text only. evaluate does not read it, so it cannot approve.
+    # A blank string is allowed; a missing key is allowed.
+    if "summary" in policy and not isinstance(policy["summary"], str):
+        return ["'summary' must be a string."]
     rules = policy["allow"]
     if not isinstance(rules, list):
         return ["'allow' must be a list of rules."]
@@ -427,9 +440,9 @@ def evaluate(request, policy, *, already_paid_ids=None):
     send to review. ``already_paid_ids`` must be an explicit collection of
     request IDs (possibly empty); None or malformed routes to review.
     ``approved_amount`` is the Decimal to pay on ``approve_full``, else None.
-    ``review_notes`` and ``rule_notes``, when present, are not read: the same
-    allow list with or without them returns the same decision, reason, matched
-    rule, and amount.
+    ``review_notes``, ``rule_notes``, and ``summary``, when present, are not
+    read: the same allow list with or without them returns the same decision,
+    reason, matched rule, and amount.
     """
     version = _policy_version(policy)
     if not validate_policy(policy):

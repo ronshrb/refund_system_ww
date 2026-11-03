@@ -17,6 +17,7 @@ from typing import Any, Mapping, MutableMapping, Sequence
 
 from utils.data.data_processing import REASONS, parse_amount
 from utils.data.dataloader import load_rows
+from utils.policy.live_policy import summarize_policy
 from utils.policy.policy_draft_tool import _json_dumps, build_policy
 from utils.policy.policy_evaluator import compare_policy_field, policy_schema_errors
 
@@ -508,13 +509,36 @@ def policy_name_error(name: str, policies_dir: Path = POLICIES_DIR) -> str | Non
     return None
 
 
+def _draft_for_storage(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy ``draft`` and set ``summary`` from the allow rules.
+
+    The stored sentence always comes from ``summarize_policy``, so a model
+    cannot supply it. The key sits with the other top-level strings.
+    """
+    summary = summarize_policy(draft)
+    leading: list[tuple[str, Any]] = []
+    rest: list[tuple[str, Any]] = []
+    passed_allow = False
+    for key, value in draft.items():
+        if key == "summary":
+            continue
+        if not passed_allow and key in {"version", "status", "comment"}:
+            leading.append((key, value))
+            continue
+        if key == "allow":
+            passed_allow = True
+        rest.append((key, value))
+    return dict([*leading, ("summary", summary), *rest])
+
+
 def save_policy_draft(
     name: str, draft: Mapping[str, Any], policies_dir: Path = POLICIES_DIR
 ) -> Path:
     """Write a validated draft to ``policies/<name>.json``; never overwrite.
 
     Saving is not activation: the file keeps ``status: "draft"`` and nothing
-    points live intake at it.
+    points live intake at it. ``summary`` is rewritten from the allow rules
+    before the write.
     """
     name_error = policy_name_error(name, policies_dir)
     if name_error:
@@ -530,7 +554,7 @@ def save_policy_draft(
     # Mode "x" fails if the file appeared since the name check.
     # _json_dumps keeps Decimal operands as JSON numbers so a reload still validates.
     with path.open("x", encoding="utf-8") as handle:
-        handle.write(_json_dumps(draft))
+        handle.write(_json_dumps(_draft_for_storage(draft)))
         handle.write("\n")
     return path
 

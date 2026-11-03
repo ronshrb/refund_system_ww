@@ -1,8 +1,9 @@
 """Reviews page — upload, queue, one-row decision, and a review comment.
 
-Part 2 reviewer. The review agent can confirm an auto approval only when its
-policy tool returns approve_full. Simulated decisions are not refunds. The
-local summary remains available for rows the agent did not comment on.
+Part 2 reviewer. A policy match is the only auto-approval. Every match is
+checked before it is written. The checkup can send that match back to a
+person. It cannot create an approval. Simulated decisions are not refunds.
+The local summary remains available for rows the checkup did not comment on.
 """
 
 from __future__ import annotations
@@ -65,8 +66,8 @@ from utils.review.queue import (
 )
 from utils.review.review_agent import (
     build_reviewer_comment,
+    checkup_match,
     fill_blank_auto_notes,
-    review_eligible_row,
 )
 from utils.review.upload_session import forget_stored_upload_once
 
@@ -162,25 +163,31 @@ def _apply_reviewer_action() -> None:
     st.session_state["review_action_notice"] = None
 
 
-def _cached_review(intake, *, already_paid_ids, policies_dir):
-    """Return the agent result for this upload, without calling the model twice.
+def _cached_checkup(payload, *, request_id):
+    """Return one checkup for this request id.
 
-    The cache is cleared when the upload token changes. A rerun of the same
-    file reuses the stored result.
+    The cache key is the request id. The call uses the checkup payload.
+    A second Review click in this session may reuse the stored checkup.
+    The checkup cannot approve.
     """
     cache = st.session_state.setdefault("review_agent_cache", {})
-    identity = intake.get("request_id")
-    if isinstance(identity, str) and identity in cache:
-        return cache[identity]
-    reviewed = review_eligible_row(
-        intake,
-        policies_dir=policies_dir,
-        already_paid_ids=already_paid_ids,
-        chat_model=None,
-    )
-    if isinstance(identity, str):
-        cache[identity] = reviewed
-    return reviewed
+    if isinstance(request_id, str) and request_id in cache:
+        return cache[request_id]
+    checked = checkup_match(payload, chat_model=None)
+    if isinstance(request_id, str):
+        cache[request_id] = checked
+    return checked
+
+
+def _read_history_rows() -> list:
+    """Load history for the checkup. A missing file is an empty list.
+
+    Does not write ``data/raw``.
+    """
+    try:
+        return load_rows(_HISTORY_PATH)
+    except (OSError, UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError):
+        return []
 
 
 def _read_json(path: Path):
@@ -314,13 +321,18 @@ def _write_user_decision(
     _save_sheet(token, columns, updated)
 
 
-def _reset_queue_selection() -> None:
-    """A new file does not keep the previous row selection."""
+def _reset_queue_selection(*, keep_checkup_cache: bool = False) -> None:
+    """A new file does not keep the previous row selection.
+
+    A second Review click may keep the checkup cache. A new upload clears it.
+    The cache key is the request id.
+    """
     st.session_state["review_selected_id"] = None
     st.session_state["review_open_index"] = None
     st.session_state["review_filter_sig"] = None
     st.session_state["review_open_table"] = _empty_selection()
-    st.session_state["review_agent_cache"] = {}
+    if not keep_checkup_cache:
+        st.session_state["review_agent_cache"] = {}
 
 
 def _picked_index(state):
@@ -374,7 +386,7 @@ if _stored is not None:
     st.caption(f"File: {_stored['filename']}")
 
 if _review_clicked:
-    _reset_queue_selection()
+    _reset_queue_selection(keep_checkup_cache=True)
     with st.spinner("The agent is reviewing the requests"):
         try:
             _fieldnames, _rows = read_upload(_stored["payload"])
@@ -385,7 +397,8 @@ if _review_clicked:
             _rows,
             log_path=_LOG_PATH,
             fieldnames=_fieldnames,
-            agent=_cached_review,
+            agent=_cached_checkup,
+            history_rows=_read_history_rows(),
         )
         _reviewed_at = datetime.now(timezone.utc)
         _previous_rows = _load_sheet(_stored["token"])[1]

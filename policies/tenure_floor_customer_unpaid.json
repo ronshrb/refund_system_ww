@@ -2,6 +2,7 @@
   "version": "test-tenure-floor-customer-unpaid",
   "status": "test",
   "comment": "Synthetic test fixture only; not approved policy. The 12-month floor is a test value, not a recommendation.",
+  "summary": "A full refund is auto-approved when any of these is true. Customer for at least 12 months, customer is identified, not already refunded.",
   "allow": [
     {
       "id": "synthetic-tenure-floor-customer-unpaid",

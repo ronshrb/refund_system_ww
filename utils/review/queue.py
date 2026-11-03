@@ -1,10 +1,13 @@
 """Turn an uploaded pending file into auto, open, and already-decided rows.
 
-An eligible row goes to the review agent. The agent can confirm an auto
-approval only when its policy tool returns ``approve_full``. In-file
-duplicates and ids already in the decision log never reach the agent. This
-module does not write ``data/raw`` or ``policies/live_pointer.json``. Paths
-are injected by the caller.
+``evaluate_live`` is the only approval. Every remaining policy match is
+sent to the review checkup before it is written. The checkup may send that
+match back to a person. It cannot create an approval. A customer note, a
+support note, a fraud flag that is not a clear no, a non-match, an in-file
+duplicate, an id already in the log, and a same-customer amount-and-category
+repeat are not sent to the model and are not auto-approved. This module
+does not write ``data/raw`` or ``policies/live_pointer.json``. Paths are
+injected by the caller.
 """
 
 from __future__ import annotations
@@ -17,13 +20,19 @@ from pathlib import Path
 import pandas as pd
 
 from utils.data.data_processing import normalize_data, normalize_date_column, parse_amount
-from utils.policy.live_policy import read_live_policy
+from utils.policy.live_policy import evaluate_live, explain_rule, read_live_policy
 from utils.review.decisions import (
-    NOTE_LIMIT,
     DecisionLogError,
     already_paid_ids,
     decided_ids,
     record_auto_approval,
+)
+from utils.review.review_agent import (
+    CHECKUP_INCOMPLETE_COMMENT,
+    build_checkup_payload,
+    build_reviewer_comment,
+    checkup_match,
+    comment_directs_approval_or_skip,
 )
 
 # Intake columns required on upload, in file order through fraud_flag.
@@ -139,17 +148,22 @@ def classify_upload(
     clock=None,
     chat_model=None,
     agent=None,
+    history_rows=None,
 ) -> dict:
     """Split uploaded string rows into errors, auto, open, and already decided.
 
     A missing required header returns an error and does not read or write the
     decision log. A blank request id is an error for that row only. A repeated
-    id is one open row (the first copy) and is not sent to the review agent.
-    An id already in the log is not decided again and is not reopened. Each
-    other id is reviewed once. Auto is recorded only when the agent confirms
-    and the policy tool returned ``approve_full`` with reason
-    ``matched_allow_rule``. ``chat_model`` is injected by tests. ``agent``,
-    when passed, replaces that call so the page can cache one upload.
+    id is one open row (the first copy) and is not evaluated. An id already
+    in the log is not decided again and is not reopened. Each other id is
+    evaluated once in Python before any model call. Auto is recorded only for
+    ``approve_full`` with reason ``matched_allow_rule``, and only after the
+    checkup returns ``hold`` exactly false. Every such match is checked,
+    including one with no review note. The model may send the match to a
+    person. It cannot create an approval. ``history_rows`` defaults to an
+    empty list and is not written. ``chat_model`` is injected by tests.
+    ``agent``, when passed, replaces the checkup so the page can cache one
+    request id. It is not called for a row the policy did not match.
     """
     try:
         materialized = list(rows)
@@ -204,87 +218,100 @@ def classify_upload(
 
     live = read_live_policy(policies_dir)
     policy_file = live["file"] if live else None
+    policy = live["policy"] if isinstance(live, Mapping) else None
     auto: list[dict] = []
     open_rows: list[dict] = []
     already: list[dict] = []
     repeats = combination_repeat_ids(materialized)
+    try:
+        history = [] if history_rows is None else list(history_rows)
+    except TypeError:
+        history = []
+    # Policy labels are computed in Python before any model call. A label is
+    # not an approval. Duplicates and already-logged ids are not evaluated.
+    evaluated, labels = _policy_labels(
+        order,
+        first_row,
+        counts,
+        logged,
+        paid,
+        policies_dir,
+    )
 
     for identity in order:
         if identity in logged:
-            # Already decided: do not call the agent, do not reopen, do not append.
+            # Already decided: do not evaluate again, do not reopen, do not append.
             already.append(dict(logged[identity]))
             continue
         intake = project_intake(first_row[identity])
         extra = counts[identity] - 1
         if extra > 0:
-            # Repeated in this file. First row only. Do not call the agent.
+            # Repeated in this file. First row only. Do not evaluate.
             open_rows.append(_open_row(identity, intake, extra_row_count=extra, reason=None))
             continue
-        reviewed = _review_eligible(
-            intake,
-            policies_dir=policies_dir,
-            already_paid_ids=set(paid),
-            chat_model=chat_model,
-            agent=agent,
-        )
-        policy_result = reviewed.get("policy_result")
-        if not isinstance(policy_result, Mapping):
-            policy_result = {}
-        tool_approved = (
-            policy_result.get("decision") == "approve_full"
-            and policy_result.get("reason") == "matched_allow_rule"
-        )
-        outcome_note = reviewed.get("outcome_note")
-        note_ok = (
-            isinstance(outcome_note, str)
-            and bool(outcome_note.strip())
-            and len(outcome_note.strip()) <= NOTE_LIMIT
-        )
-        # Same customer, amount, and category on another id stays with a person.
-        blocked_repeat = identity in repeats
-        # The model cannot confirm an approval the policy tool did not return.
-        if reviewed.get("confirm_auto") is True and tool_approved and note_ok and not blocked_repeat:
-            try:
-                stored, created = record_auto_approval(
-                    log_path,
-                    request_id=identity,
-                    amount=policy_result.get("approved_amount"),
-                    outcome_note=outcome_note.strip(),
-                    policy_file=policy_file,
-                    clock=clock,
-                )
-            except DecisionLogError as error:
-                # A failed write is not an approval. Leave the row open.
-                errors.append(_error("log_unreadable", str(error)))
-                open_rows.append(_open_row(
-                    identity,
-                    intake,
-                    extra_row_count=0,
-                    reason="review_agent_held",
-                    reviewer_comment=reviewed.get("reviewer_comment"),
-                ))
-                continue
-            if not created:
-                already.append(dict(stored))
-                continue
-            paid.add(identity)
-            logged[identity] = stored
-            auto.append({
-                "request_id": identity,
-                "amount": stored.get("amount") or "none",
-                "outcome_note": stored.get("outcome_note") or "",
-            })
+        result = evaluated[identity]
+        matched = _is_policy_match(result)
+        # Same customer, amount, and category stays with a person even when
+        # the policy matches. Do not call the model and do not pay.
+        if identity in repeats:
+            reason = "possible_repeat" if matched else _reason_text(result)
+            open_rows.append(_open_row(
+                identity,
+                intake,
+                extra_row_count=0,
+                reason=reason,
+                reviewer_comment=_local_comment(intake, result, policy),
+            ))
             continue
-        if blocked_repeat and tool_approved:
-            reason = "possible_repeat"
-        else:
-            reason = "review_agent_held" if tool_approved else policy_result.get("reason")
+        if not matched:
+            # A model reply cannot pay a row the policy did not match.
+            open_rows.append(_open_row(
+                identity,
+                intake,
+                extra_row_count=0,
+                reason=_reason_text(result),
+                reviewer_comment=_local_comment(intake, result, policy),
+            ))
+            continue
+        # The agent is the last step for a policy match, including one with
+        # no review note. hold false records the policy approval. Anything
+        # else leaves the row open and writes nothing.
+        payload = build_checkup_payload(
+            intake=intake,
+            policy_result=result,
+            policy=policy if isinstance(policy, Mapping) else None,
+            rule_sentence=_explain_matched_rule(policy, result.get("matched_rule")),
+            other_rows=_other_upload_rows(materialized, identity, labels),
+            history_rows=history,
+        )
+        checked = _run_checkup(identity, payload, chat_model=chat_model, agent=agent)
+        if checked.get("status") == "clear":
+            _store_match(
+                auto, open_rows, already, errors, logged, paid,
+                log_path=log_path,
+                identity=identity,
+                intake=intake,
+                result=result,
+                policy=policy,
+                policy_file=policy_file,
+                clock=clock,
+            )
+            continue
+        if checked.get("status") == "hold":
+            open_rows.append(_open_row(
+                identity,
+                intake,
+                extra_row_count=0,
+                reason="review_note_hold",
+                reviewer_comment=checked.get("reviewer_comment"),
+            ))
+            continue
         open_rows.append(_open_row(
             identity,
             intake,
             extra_row_count=0,
-            reason=reason if isinstance(reason, str) else None,
-            reviewer_comment=reviewed.get("reviewer_comment"),
+            reason="checkup_incomplete",
+            reviewer_comment=checked.get("reviewer_comment") or CHECKUP_INCOMPLETE_COMMENT,
         ))
 
     return {
@@ -674,53 +701,201 @@ def _open_row(
     return row
 
 
-def _review_eligible(
-    intake: Mapping,
-    *,
-    policies_dir: Path | None,
-    already_paid_ids,
-    chat_model,
-    agent,
-) -> dict:
-    """Run the review agent, or the page's cached callable, for one row.
-
-    A failure is not an approval. The returned mapping never has
-    ``confirm_auto`` true unless the agent itself said so.
-    """
+def _evaluate_intake(intake: Mapping, paid, policies_dir: Path | None) -> dict:
+    """Run ``evaluate_live`` in Python. A failure is not an approval."""
     try:
-        if agent is not None:
-            reviewed = agent(
-                intake,
-                already_paid_ids=already_paid_ids,
-                policies_dir=policies_dir,
-            )
-        else:
-            from utils.review.review_agent import review_eligible_row
-
-            reviewed = review_eligible_row(
-                intake,
-                policies_dir=policies_dir,
-                already_paid_ids=already_paid_ids,
-                chat_model=chat_model,
-            )
+        result = evaluate_live(
+            intake,
+            already_paid_ids=set(paid),
+            policies_dir=policies_dir,
+        )
     except Exception:
         return {
-            "confirm_auto": False,
-            "outcome_note": "",
-            "reviewer_comment": (
-                "Review agent — not a decision.\n"
-                "This request was not auto-approved."
-            ),
-            "policy_result": {},
+            "decision": "review",
+            "reason": "invalid_request",
+            "matched_rule": None,
+            "approved_amount": None,
         }
-    if not isinstance(reviewed, Mapping):
-        return {
-            "confirm_auto": False,
-            "outcome_note": "",
-            "reviewer_comment": "",
-            "policy_result": {},
-        }
-    return dict(reviewed)
+    return result if isinstance(result, Mapping) else {
+        "decision": "review",
+        "reason": "invalid_request",
+        "matched_rule": None,
+        "approved_amount": None,
+    }
+
+
+def _policy_labels(order, first_row, counts, logged, paid, policies_dir):
+    """Evaluate each eligible id once. The returned label cannot pay a row."""
+    evaluated: dict[str, Mapping] = {}
+    labels: dict[str, str] = {}
+    for identity in order:
+        if identity in logged:
+            labels[identity] = "already_decided"
+            continue
+        if counts[identity] > 1:
+            labels[identity] = "duplicate_request_id"
+            continue
+        result = _evaluate_intake(project_intake(first_row[identity]), paid, policies_dir)
+        evaluated[identity] = result
+        if _is_policy_match(result):
+            labels[identity] = "matched_allow_rule"
+        else:
+            labels[identity] = _reason_text(result) or "invalid_request"
+    return evaluated, labels
+
+
+def _other_upload_rows(rows, current_id: str, labels: dict[str, str]) -> list[dict]:
+    """Other upload rows, without their customer or support note text."""
+    others = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        raw_id = row.get("request_id")
+        identity = raw_id.strip() if isinstance(raw_id, str) else ""
+        if identity == current_id:
+            continue
+        if identity:
+            classification = labels.get(identity, "invalid_request")
+        else:
+            classification = "blank_request_id"
+        others.append({
+            "request_id": identity,
+            "customer_id": row.get("customer_id") if isinstance(row.get("customer_id"), str) else "",
+            "amount": row.get("amount_usd") if isinstance(row.get("amount_usd"), str) else "",
+            "stated_reason": row.get("stated_reason") if isinstance(row.get("stated_reason"), str) else "",
+            "classification": classification,
+        })
+    return others
+
+
+def _is_policy_match(result: Mapping) -> bool:
+    return (
+        result.get("decision") == "approve_full"
+        and result.get("reason") == "matched_allow_rule"
+    )
+
+
+def _reason_text(result: Mapping) -> str | None:
+    reason = result.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason
+    return None
+
+
+def _local_comment(intake: Mapping, result: Mapping, policy) -> str:
+    return build_reviewer_comment(
+        intake=intake,
+        policy_result=result,
+        policy=policy if isinstance(policy, Mapping) else None,
+    )
+
+
+def _explain_matched_rule(policy, matched_rule: object) -> str:
+    """Plain sentence for the allow rule ``evaluate_live`` matched."""
+    if not isinstance(policy, Mapping) or not isinstance(matched_rule, str):
+        return ""
+    allow = policy.get("allow")
+    if not isinstance(allow, list):
+        return ""
+    for rule in allow:
+        if isinstance(rule, Mapping) and rule.get("id") == matched_rule:
+            sentence = explain_rule(rule)
+            return sentence.strip() if isinstance(sentence, str) else ""
+    return ""
+
+
+def _store_match(
+    auto: list[dict],
+    open_rows: list[dict],
+    already: list[dict],
+    errors: list[dict],
+    logged: dict,
+    paid: set,
+    *,
+    log_path: Path,
+    identity: str,
+    intake: Mapping,
+    result: Mapping,
+    policy,
+    policy_file: str | None,
+    clock,
+) -> None:
+    """Record the policy match. A refused write stays open and unpaid.
+
+    The outcome note is ``explain_rule`` for the matched rule. The model
+    comment is not stored. Customer and support text are not stored.
+    """
+    rule_id = result.get("matched_rule")
+    sentence = _explain_matched_rule(policy, rule_id)
+    amount = result.get("approved_amount")
+    if not isinstance(amount, Decimal):
+        amount = None
+    if not isinstance(rule_id, str) or not sentence:
+        open_rows.append(_open_row(
+            identity,
+            dict(intake),
+            extra_row_count=0,
+            reason="review_agent_held",
+            reviewer_comment=_local_comment(intake, result, policy),
+        ))
+        return
+    try:
+        stored, created = record_auto_approval(
+            log_path,
+            request_id=identity,
+            amount=amount,
+            outcome_note=sentence,
+            matched_rule=rule_id,
+            policy_file=policy_file,
+            clock=clock,
+        )
+    except DecisionLogError as error:
+        # A failed write is not an approval. Leave the row open.
+        errors.append(_error("log_unreadable", str(error)))
+        open_rows.append(_open_row(
+            identity,
+            dict(intake),
+            extra_row_count=0,
+            reason="review_agent_held",
+            reviewer_comment=_local_comment(intake, result, policy),
+        ))
+        return
+    if not created:
+        already.append(dict(stored))
+        return
+    paid.add(identity)
+    logged[identity] = stored
+    auto.append({
+        "request_id": identity,
+        "amount": stored.get("amount") or "none",
+        "outcome_note": stored.get("outcome_note") or "",
+    })
+
+
+def _run_checkup(identity: str, payload: Mapping, *, chat_model, agent) -> dict:
+    """One checkup call. Any result other than hold false leaves the match unpaid."""
+    try:
+        if agent is not None:
+            checked = agent(payload, request_id=identity)
+        else:
+            checked = checkup_match(payload, chat_model=chat_model)
+    except Exception:
+        checked = None
+    if not isinstance(checked, Mapping):
+        return {"status": "incomplete", "reviewer_comment": CHECKUP_INCOMPLETE_COMMENT}
+    if checked.get("status") == "clear":
+        # The model comment is not an approval and is not kept.
+        return {"status": "clear", "reviewer_comment": ""}
+    comment = checked.get("reviewer_comment")
+    # A hold comment that tells the reviewer to approve or skip review is not accepted.
+    if (
+        checked.get("status") == "hold"
+        and isinstance(comment, str)
+        and comment.strip()
+        and not comment_directs_approval_or_skip(comment)
+    ):
+        return {"status": "hold", "reviewer_comment": comment}
+    return {"status": "incomplete", "reviewer_comment": CHECKUP_INCOMPLETE_COMMENT}
 
 
 def _header_names(fieldnames, rows: list) -> list[str]:

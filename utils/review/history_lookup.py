@@ -72,6 +72,67 @@ def similar_history(
     return [_display_row(row) for row in matched[:limit]]
 
 
+def customer_history(
+    rows,
+    *,
+    customer_id: str,
+    limit: int = DEFAULT_LIMIT,
+) -> list[dict]:
+    """Return up to ``limit`` history rows with this customer id.
+
+    Newest ``requested_at`` first, with the same tie-break as
+    ``similar_history``. A blank customer id matches nothing. Customer and
+    support note text is left out.
+    """
+    selected = customer_id.strip() if isinstance(customer_id, str) else ""
+    if not selected:
+        return []
+    return _select_history(
+        rows,
+        limit=limit,
+        include=lambda row: _cell(row, "customer_id") == selected,
+    )
+
+
+def request_history(
+    rows,
+    *,
+    request_id: str,
+    limit: int = DEFAULT_LIMIT,
+) -> list[dict]:
+    """Return history rows with this request id so a duplicate is visible.
+
+    ``similar_history`` leaves the selected request id out. This list puts it
+    back. Customer and support note text is left out.
+    """
+    selected = request_id.strip() if isinstance(request_id, str) else ""
+    if not selected:
+        return []
+    return _select_history(
+        rows,
+        limit=limit,
+        include=lambda row: _cell(row, "request_id") == selected,
+    )
+
+
+def _select_history(rows, *, limit: int, include) -> list[dict]:
+    """Newest matching rows, capped, without customer or support note text."""
+    if limit < 1:
+        return []
+    try:
+        materialized = list(rows)
+    except TypeError:
+        return []
+    matched = [row for row in materialized if isinstance(row, Mapping) and include(row)]
+    matched.sort(key=_sort_key)
+    return [_context_row(row) for row in matched[:limit]]
+
+
+def _cell(row: Mapping, key: str) -> str:
+    value = row.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _parse_requested_at(value: object) -> datetime | None:
     """Parse the three supported request dates, or return None."""
     if not isinstance(value, str):
@@ -102,4 +163,12 @@ def _display_row(row: Mapping) -> dict[str, str]:
     for key in HISTORY_COLUMNS:
         value = row.get(key, "")
         visible[key] = value if isinstance(value, str) else ""
+    return visible
+
+
+def _context_row(row: Mapping) -> dict[str, str]:
+    """History fields the checkup may see. Notes are not copied."""
+    visible = _display_row(row)
+    for key in ("customer_id", "stated_reason"):
+        visible[key] = _cell(row, key)
     return visible

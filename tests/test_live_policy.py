@@ -10,13 +10,18 @@ from utils.policy.live_policy import (
     evaluate_live,
     explain_rule,
     list_policy_files,
+    live_file_select_index,
     make_live,
+    make_live_button_disabled,
     approvals_csv,
     auto_approval_split,
     historical_auto_approvals,
     history_outcome_rates,
     preview_auto_approvals,
+    summarize_policy,
 )
+from utils.policy.policy_evaluator import validate_policy
+from utils.policy.policy_preview import parse_policy_file
 
 _MATCHING_POLICY = {
     "version": 1,
@@ -149,6 +154,78 @@ class LivePolicyTests(unittest.TestCase):
         self.assertIn("Changed mind", unknown)
         self.assertIn("an extra condition", unknown)
         self.assertNotIn("carrier_photo", unknown)
+
+    def test_summarize_policy_uses_explain_rule_and_hides_operator_keys(self):
+        policy = {
+            "version": 1,
+            "allow": [_MATCHING_POLICY["allow"][0]],
+            "review_notes": [{
+                "reason": "never_arrived",
+                "text": "Carrier signature is not an auto-approve rule.",
+            }],
+        }
+        rule_sentence = explain_rule(policy["allow"][0])
+        text = summarize_policy(policy)
+        self.assertEqual(
+            text,
+            "A full refund is auto-approved when any of these is true. " + rule_sentence,
+        )
+        for operator in (
+            "stated_reason",
+            "days_since_delivery_lte",
+            "amount_usd_lte",
+            "tenure_months_gte",
+            "fraud_flag",
+            "customer_id_present",
+            "customer_note_blank",
+            "support_note_blank",
+            "request_id_not_already_paid",
+        ):
+            self.assertNotIn(operator, text)
+        self.assertNotIn("Carrier signature", text)
+        empty = "No rule auto-approves a refund, so a person decides."
+        self.assertEqual(summarize_policy({"allow": []}), empty)
+        self.assertEqual(summarize_policy({}), empty)
+
+    def test_picker_defaults_to_live_file_and_disables_that_button(self):
+        names = ["alpha.json", "beta.json"]
+        self.assertEqual(live_file_select_index(names, "beta.json"), 1)
+        self.assertEqual(live_file_select_index(names, None), 0)
+        self.assertEqual(live_file_select_index(names, "missing.json"), 0)
+        self.assertTrue(make_live_button_disabled("beta.json", "beta.json"))
+        self.assertFalse(make_live_button_disabled("alpha.json", "beta.json"))
+        self.assertFalse(make_live_button_disabled("alpha.json", None))
+
+    def test_selectable_policies_store_a_nonempty_summary(self):
+        root = Path(__file__).resolve().parents[1] / "policies"
+        listed = list_policy_files()
+        self.assertGreater(len(listed), 0)
+        operators = (
+            "stated_reason",
+            "days_since_delivery_gte",
+            "days_since_delivery_lte",
+            "amount_usd_gt",
+            "amount_usd_lte",
+            "tenure_months_gte",
+            "fraud_flag",
+            "customer_id_present",
+            "customer_note_blank",
+            "support_note_blank",
+            "request_id_not_already_paid",
+        )
+        for item in listed:
+            policy = parse_policy_file(root / item["file"])
+            self.assertTrue(validate_policy(policy), item["file"])
+            summary = policy.get("summary")
+            self.assertIsInstance(summary, str, item["file"])
+            self.assertTrue(summary.strip(), item["file"])
+            self.assertEqual(summary, summarize_policy(policy), item["file"])
+            for operator in operators:
+                self.assertNotIn(operator, summary, item["file"])
+        pointer = json.loads((root / "live_pointer.json").read_text(encoding="utf-8"))
+        template = json.loads((root / "policy.template.json").read_text(encoding="utf-8"))
+        self.assertNotIn("summary", pointer)
+        self.assertNotIn("summary", template)
 
     def test_list_policy_files_omits_live_pointer_and_template(self):
         self.write_policy("alpha.json", {"version": 1, "status": "draft", "allow": []})
