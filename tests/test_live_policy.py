@@ -150,9 +150,13 @@ class LivePolicyTests(unittest.TestCase):
         self.assertIn("an extra condition", unknown)
         self.assertNotIn("carrier_photo", unknown)
 
-    def test_list_policy_files_omits_live_pointer(self):
+    def test_list_policy_files_omits_live_pointer_and_template(self):
         self.write_policy("alpha.json", {"version": 1, "status": "draft", "allow": []})
         self.write_policy("beta.json", {"version": 1, "allow": []})
+        self.write_policy(
+            "policy.template.json",
+            {"version": 1, "status": "draft", "allow": []},
+        )
         (self.policies / "live_pointer.json").write_text(
             json.dumps({"file": "alpha.json"}), encoding="utf-8"
         )
@@ -162,8 +166,11 @@ class LivePolicyTests(unittest.TestCase):
 
         self.assertEqual(names, ["alpha.json", "beta.json"])
         self.assertNotIn("live_pointer.json", names)
+        self.assertNotIn("policy.template.json", names)
         self.assertEqual(listed[0]["status"], "draft")
         self.assertIsNone(listed[1]["status"])
+        with self.assertRaises(ValueError):
+            make_live("policy.template.json", policies_dir=self.policies)
 
     def test_preview_ignores_history_decision_and_skips_duplicate_ids(self):
         labeled_review = _matching_request(

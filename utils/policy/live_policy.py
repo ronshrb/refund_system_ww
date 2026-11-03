@@ -27,6 +27,8 @@ AUTO_REFUND_FEE = Decimal("25")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 POLICIES_DIR = PROJECT_ROOT / "policies"
 LIVE_POINTER_NAME = "live_pointer.json"
+# Blank starter for the Policy Builder. Not a policy the manager can select.
+TEMPLATE_POLICY_NAME = "policy.template.json"
 
 # Same post-decision columns preview_matching_rows refuses to treat as intake.
 _POST_DECISION_FIELDS = frozenset({
@@ -71,20 +73,22 @@ _NO_LIVE_RESULT = {
 
 
 def list_policy_files(policies_dir: Path | None = None) -> list[dict[str, str | None]]:
-    """Return policy JSON files and their status, excluding the live pointer.
+    """Return policy JSON files and their status, excluding non-policies.
 
-    Template and example files are included. ``live_pointer.json`` is not a
-    policy and is never listed. A file that cannot be read still appears, with
-    status ``None``.
+    ``live_pointer.json`` only names the live file. ``policy.template.json`` is
+    the Policy Builder's blank starting draft. Neither is selectable. Example
+    files are included. A file that cannot be read still appears, with status
+    ``None``.
     """
     directory = _policies_directory(policies_dir)
     if not directory.is_dir():
         return []
+    hidden = {LIVE_POINTER_NAME, TEMPLATE_POLICY_NAME}
     items = []
     for path in directory.iterdir():
         if not path.is_file() or path.suffix.lower() != ".json":
             continue
-        if path.name == LIVE_POINTER_NAME:
+        if path.name in hidden:
             continue
         items.append({"file": path.name, "status": _status_string(path)})
     items.sort(key=lambda item: item["file"])

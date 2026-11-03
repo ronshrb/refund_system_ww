@@ -39,5 +39,5 @@ policy_page = st.Page(
     title="Policy Management",
 )
 
-navigation = st.navigation([reviews_page, policy_page])
+navigation = st.navigation([reviews_page, policy_page], position="top")
 navigation.run()

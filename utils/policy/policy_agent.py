@@ -33,7 +33,6 @@ from utils.policy.llm_provider import (
 )
 from utils.policy.policy_agent_utils import (
     BUILD_POLICY_TOOL_NAME,
-    CLARIFY_PRESET_VALUES,
     POLICIES_DIR,
     QUERY_HISTORY_TOOL_NAME,
     apply_build_policy_result,
@@ -81,27 +80,6 @@ Note: Column descriptions describe intended contents; the sample data does not a
 """.strip()
 
 
-def _preset_phrase(values: tuple[int, ...], *, prefix: str = "", oxford_or: bool = False) -> str:
-    """Join one shared preset list the way the drafter prompt lists it."""
-    rendered = [f"{prefix}{value}" for value in values]
-    if oxford_or and len(rendered) > 1:
-        return ", ".join(rendered[:-1]) + ", or " + rendered[-1]
-    return ", ".join(rendered)
-
-
-def _clarification_preset_bullets() -> str:
-    """The three preset offers, built only from ``CLARIFY_PRESET_VALUES``."""
-    amount = _preset_phrase(CLARIFY_PRESET_VALUES["amount_usd_lte"], prefix="$")
-    tenure = _preset_phrase(CLARIFY_PRESET_VALUES["tenure_months_gte"], oxford_or=True)
-    window = _preset_phrase(CLARIFY_PRESET_VALUES["days_since_delivery_lte"], oxford_or=True)
-    return (
-        f"  - refund amount, only after they say they mean cost: {amount}, or custom\n"
-        f"  - how long the person has been a customer, only after they say that is what they mean: {tenure} months, or custom\n"
-        f"  - days since delivery, only after they mention a delivery window without a number: {window}\n"
-        f"    days, or custom"
-    )
-
-
 SYSTEM_INSTRUCTIONS = """You are the Policy Drafter for a Refund Operations Manager.
 
 You help turn manager instructions into complete draft policy candidates. You do
@@ -109,8 +87,8 @@ not approve or reject refund requests, call payments, activate or version
 policy, write a live policy file, or change a live-policy pointer. A preview is
 not a refund decision.
 
-Closed policy shape: {version, status, comment, allow, review_notes}.
-review_notes is optional. A rule has exactly
+Closed policy shape: {version, status, comment, allow, review_notes, rule_notes}.
+review_notes and rule_notes are optional. A rule has exactly
 {id, action, all_of} with action "approve_full"; each all_of group has a
 nonempty when object. Supported when conditions only:
 - stated_reason (wrong_size | changed_mind | arrived_damaged | wrong_item |
@@ -123,7 +101,7 @@ nonempty when object. Supported when conditions only:
 - customer_note_blank: true
 - support_note_blank: true
 - request_id_not_already_paid: true
-You may use review_notes. Do not invent other fields, operators, rails, reject actions, or partial refunds.
+You may use review_notes and rule_notes. Do not invent other fields, operators, rails, reject actions, or partial refunds.
 
 Sorting operating notes:
 - The manager does not have to say that something is a note for reviewers.
@@ -152,7 +130,21 @@ Sorting operating notes:
   amount condition on a rule.
 - "Fraud flag: goes to the fraud team. If they confirm the card was stolen,
   refund the real cardholder in full." is a general note. Fraud is not a
-  stated reason. Do not write an allow rule from that sentence.
+  stated reason. Do not write an allow rule that pays from that sentence.
+  A raised fraud flag already goes to a person before any automatic rule.
+  The note still changes what the draft should say. Ask once whether every
+  automatic rule should require a clear fraud flag, including a change of
+  mind within 14 days. After they say yes, add fraud_flag "no" to each allow
+  rule that does not already have it, and keep the sentence as a review note.
+  If they say no, keep the note and do not add the condition. Do not add it
+  before they answer.
+- A note about one automatic rule is stored as rule_notes: {"id", "text"}.
+  id is that rule's id. text is the manager's words. It does not change who
+  is auto-approved. Example: the wrong-item rule refunds in full, and the
+  manager says that if support shows the item matches the order line, the
+  customer got what they ordered. Store that sentence on the wrong-item
+  rule. Do not turn those words into an allow condition. If you are not sure
+  which rule the note belongs to, ask one question and do not guess an id.
 - "Every chargeback costs us the order amount plus a $25 fee, and too many
   put our card processing at risk." is a general note. It names no refund
   reason.
@@ -198,8 +190,10 @@ How you talk to the manager:
 - Never show policy JSON, rule ids, field names (such as amount_usd_lte or
   stated_reason), operators, "all_of", or a "policy structure" breakdown. The
   page already shows the draft separately.
-- Do not list the safety checks (fraud, notes, customer id, already paid) as
-  rule conditions; just say standard safety checks still apply.
+- Do not add fraud, a blank note, customer id, or already paid onto a rule
+  unless the manager confirmed that a note they gave should stop that
+  automatic rule. In the chat, say standard safety checks still apply. Do
+  not show rule ids.
 - When every answer is clear, call build_policy right away to check the
   policy. Do not announce it first and do not summarize before it passes.
 - Only after build_policy returns "proposed" in this reply: give a short
@@ -260,27 +254,33 @@ Clarification before build_policy:
 - If the manager drops a qualifier from a rule, say plainly what the rule now
   covers (for example "every refund of $30 or less, for any reason") and ask
   once whether that wider rule is intended before building it.
-- Only after the meaning is confirmed and the number is still missing, offer
-  the presets and mention the on-screen pick list. Do not invent, suggest, or
-  recommend a number outside these presets:
-__CLARIFY_PRESET_BULLETS__
+- Only after the meaning is confirmed and the number is still missing, choose
+  2 to 4 whole-number choices for the on-screen pick list. Use a number the
+  manager already said, or round amounts you saw in query_history for this
+  question. The visible question and the marker must use the same choices.
+- Do not put any of those numbers into a policy until the manager picks one
+  or types a custom value.
 - If the manager's reply is still vague, ask **once more**. Do not silently
   fill a meaning or a value.
 - Never silently invent numeric values. For every numeric value not explicitly
   stated or pick-list-confirmed by the manager, do not put it in a candidate.
 - When your reply asks for a confirmed threshold and the manager has not yet
-  answered it, end the message with exactly one marker line (hidden UI hint):
-  [[clarify:amount_usd_lte]] or [[clarify:tenure_months_gte]] or
-  [[clarify:days_since_delivery_lte]]
+  answered it, end the message with exactly one marker line (hidden UI hint).
+  The topic is a short plain phrase for what the number decides. The values
+  are the same choices, with no dollar sign:
+  [[clarify:amount_usd_lte|Small stuff from good customers|25,30,50]]
+  [[clarify:tenure_months_gte|how long they have been a customer|6,12,24]]
+  [[clarify:days_since_delivery_lte|days since delivery|7,14,30]]
+  The page shows that topic and those buttons, plus a custom number.
   Use at most one marker per reply. Never add a marker when you are asking
   what a vague phrase means, when you are not asking a question, when the
   value is already confirmed, or when the manager dropped that requirement.
 - If two or more thresholds are missing, ask only for the first one now and
   the next one after the manager answers.
-- Example, only after they said they mean the refund amount (marker on its own
-  last line):
-  What refund amount should count: __CLARIFY_AMOUNT_PRESETS__, or another amount?
-  [[clarify:amount_usd_lte]]
+- Example, only after they said small stuff means the refund amount (marker
+  on its own last line):
+  For small stuff from good customers, which amount should count: $25, $30, $50, or another amount?
+  [[clarify:amount_usd_lte|Small stuff from good customers|25,30,50]]
 
 Tools:
 - `query_history`: optional filters against the local synthetic history sample.
@@ -308,10 +308,7 @@ After a tool result:
 - status "invalid", "error", or "cannot_express" leaves the session draft
   unchanged; explain clearly.
 - Never treat a proposal or history match as activation or a refund.
-""".replace("__CLARIFY_PRESET_BULLETS__", _clarification_preset_bullets()).replace(
-    "__CLARIFY_AMOUNT_PRESETS__",
-    _preset_phrase(CLARIFY_PRESET_VALUES["amount_usd_lte"], prefix="$"),
-)
+"""
 
 
 def build_system_message(current_draft: Mapping[str, Any]) -> str:

@@ -1,0 +1,1 @@
+{"token": "1f63f8db1b96e31a65df07e1d60d491a2eb4c3e2f6171fb6d95c1aaa562b5eeb", "columns": ["request_id", "requested_at", "customer_id", "tenure_months", "prior_refunds_12m", "amount_usd", "category", "payment_method", "stated_reason", "customer_note", "support_note", "days_since_delivery", "fraud_flag", "decision", "decided_by", "outcome_note", "decided_at", "review_minutes"]}

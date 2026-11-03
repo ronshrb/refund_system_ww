@@ -101,6 +101,21 @@ def _candidate_policy_schema() -> dict[str, Any]:
             "status": {"type": "string", "enum": ["draft"]},
             "comment": {"type": "string"},
             "allow": {"type": "array", "items": rule},
+            "rule_notes": {
+                "type": "array",
+                "description": (
+                    "The manager's words about one allow rule, for the reviewer. "
+                    "id must match an allow rule. Does not change auto-approve."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "text": {"type": "string"},
+                    },
+                    "required": ["id", "text"],
+                },
+            },
             "review_notes": {
                 "type": "array",
                 "description": (
@@ -336,7 +351,10 @@ CLARIFY_PRESET_VALUES: dict[str, tuple[int, ...]] = {
     "days_since_delivery_lte": (7, 14, 30),
 }
 CLARIFY_MARKER_PATTERN = re.compile(
-    r"\[\[clarify:(" + "|".join(CLARIFY_PRESET_VALUES) + r")\]\]"
+    r"\[\[clarify:(" + "|".join(CLARIFY_PRESET_VALUES) + r")"
+    r"(?:\|([^|\]]{1,80}))?"
+    r"(?:\|([0-9]{1,6}(?:\s*,\s*[0-9]{1,6}){1,5}))?"
+    r"\]\]"
 )
 
 
@@ -350,6 +368,86 @@ def _preset_mention_pattern(values: tuple[int, ...]) -> re.Pattern[str]:
 CLARIFY_PRESET_PATTERNS = {
     kind: _preset_mention_pattern(values) for kind, values in CLARIFY_PRESET_VALUES.items()
 }
+_CLARIFY_BULLET = re.compile(r"^(?:\d+[\).\]]\s*|[-*]\s*)")
+_CLARIFY_FALLBACK = {
+    "amount_usd_lte": "The refund amount in the question above",
+    "tenure_months_gte": "How long the customer has been with you",
+    "days_since_delivery_lte": "How many days since delivery",
+}
+
+
+def parse_clarify_marker(text: str) -> dict[str, Any] | None:
+    """Read the topic and choices the agent put in one clarify marker.
+
+    A marker is ``[[clarify:amount_usd_lte|Small stuff from good customers|25,30,50]]``.
+    The kind is which threshold is being asked. The topic is the short phrase
+    the agent wrote. The values are the button amounts, in the agent's order.
+    A bare ``[[clarify:amount_usd_lte]]`` still returns the kind, with no topic
+    and no values. Two to four positive whole numbers are accepted.
+    """
+    if not isinstance(text, str):
+        return None
+    match = CLARIFY_MARKER_PATTERN.search(text)
+    if match is None:
+        return None
+    topic = (match.group(2) or "").strip()
+    if not (2 <= len(topic) <= 80) or any(character in topic for character in "[]{}"):
+        topic = ""
+    return {
+        "kind": match.group(1),
+        "topic": topic or None,
+        "values": _clarify_marker_values(match.group(3)),
+    }
+
+
+def _clarify_marker_values(raw: str | None) -> tuple[int, ...] | None:
+    """Return two to four distinct positive choices, or None when unusable."""
+    if not raw:
+        return None
+    numbers: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part.isdigit():
+            return None
+        number = int(part)
+        if number <= 0 or number > 100000 or number in numbers:
+            return None
+        numbers.append(number)
+    if not 2 <= len(numbers) <= 4:
+        return None
+    return tuple(numbers)
+
+
+def clarify_pick_caption(kind: str, assistant_text: str) -> str:
+    """Caption for the on-screen pick list, naming what the question is about.
+
+    The buttons are a dollar amount, a tenure, or a day count. The caption
+    uses the topic in the assistant's question, such as "Small stuff from
+    good customers", instead of a generic field name.
+    """
+    subject = _clarify_subject(kind, assistant_text)
+    topic = subject or _CLARIFY_FALLBACK[kind]
+    return (
+        f"{topic}. Choose a preset or enter a custom value — "
+        "one clear answer so we do not invent a threshold."
+    )
+
+
+def _clarify_subject(kind: str, assistant_text: str) -> str | None:
+    """Return the short topic on the paragraph that offers this pick list."""
+    if kind not in CLARIFY_PRESET_PATTERNS or not isinstance(assistant_text, str):
+        return None
+    cleaned = CLARIFY_MARKER_PATTERN.sub("", assistant_text)
+    pattern = CLARIFY_PRESET_PATTERNS[kind]
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+    for paragraph in paragraphs:
+        if not pattern.search(paragraph) or ":" not in paragraph:
+            continue
+        head = paragraph.split(":", 1)[0].strip().splitlines()[-1]
+        head = _CLARIFY_BULLET.sub("", head).strip().strip("\"'")
+        if 2 <= len(head) <= 80 and any(character.isalpha() for character in head):
+            return head
+    return None
 # Words that show the manager raised the topic themselves.
 _TOPIC_MENTION_PATTERNS = {
     "amount_usd_lte": re.compile(

@@ -7,7 +7,11 @@ from pathlib import Path
 
 from utils.data.dataloader import load_rows
 from utils.policy.policy_evaluator import evaluate as _evaluate
-from utils.policy.policy_evaluator import policy_schema_errors, validate_policy
+from utils.policy.policy_evaluator import (
+    fitting_allow_rules,
+    policy_schema_errors,
+    validate_policy,
+)
 
 POLICY_FIXTURES = Path(__file__).parent / "fixtures" / "policies"
 PENDING_CSV = Path(__file__).resolve().parent.parent / "data" / "raw" / "pending.csv"
@@ -111,6 +115,23 @@ class PolicySchemaErrorTests(unittest.TestCase):
         unknown = policy_schema_errors(policy)[0]
         self.assertIn("Unknown top-level keys ['reject']", unknown)
 
+    def test_rule_notes_must_name_an_allow_rule(self):
+        policy = make_policy({"stated_reason": "wrong_item"}, rule_id="wrong_item_full_refund")
+        policy["rule_notes"] = []
+        self.assertEqual(policy_schema_errors(policy), [])
+        text = "If support says the item matches the order line, they got what they ordered."
+        policy["rule_notes"] = [{"id": "wrong_item_full_refund", "text": text}]
+        self.assertEqual(policy_schema_errors(policy), [])
+
+        policy["rule_notes"] = [{"id": "missing_rule", "text": text}]
+        self.assertIn("does not match an allow rule", policy_schema_errors(policy)[0])
+
+        policy["rule_notes"] = [{"id": "wrong_item_full_refund", "text": text, "reason": "wrong_item"}]
+        self.assertIn("rule_notes[0]", policy_schema_errors(policy)[0])
+
+        policy["rule_notes"] = [{"id": "wrong_item_full_refund", "text": "  "}]
+        self.assertIn("rule_notes[0].text", policy_schema_errors(policy)[0])
+
     def test_review_notes_do_not_change_evaluate(self):
         policy = make_policy({"stated_reason": "changed_mind"})
         with_notes = make_policy({"stated_reason": "changed_mind"})
@@ -131,6 +152,29 @@ class PolicySchemaErrorTests(unittest.TestCase):
             with_result = evaluate(request, with_notes)
             for field in compared:
                 self.assertEqual(with_result[field], without[field])
+
+    def test_rule_notes_do_not_change_evaluate_and_do_not_approve(self):
+        policy = make_policy({"stated_reason": "wrong_item"}, rule_id="wrong_item_full_refund")
+        noted = make_policy({"stated_reason": "wrong_item"}, rule_id="wrong_item_full_refund")
+        noted["rule_notes"] = [{
+            "id": "wrong_item_full_refund",
+            "text": "If support says the item matches the order line, they got what they ordered.",
+        }]
+        request = eligible_request(
+            stated_reason="wrong item",
+            support_note="matches order line - customer ordered this model",
+        )
+        compared = ("decision", "reason", "matched_rule", "approved_amount")
+        without = evaluate(request, policy)
+        with_note = evaluate(request, noted)
+        for field in compared:
+            self.assertEqual(with_note[field], without[field])
+        self.assertEqual(without["decision"], "review")
+        self.assertEqual(without["reason"], "note_requires_review")
+        self.assertEqual(
+            fitting_allow_rules(request, noted),
+            ["wrong_item_full_refund"],
+        )
 
 
 class PolicyEvaluatorTests(unittest.TestCase):

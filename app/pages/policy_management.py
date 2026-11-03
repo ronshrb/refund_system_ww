@@ -37,6 +37,8 @@ from utils.policy.policy_agent_utils import (
     CLARIFY_PRESET_VALUES,
     HISTORY_PATH,
     POLICIES_DIR,
+    clarify_pick_caption,
+    parse_clarify_marker,
 )
 from utils.policy.policy_preview import PolicyInputError, parse_policy_file
 
@@ -61,24 +63,21 @@ _READY_MARKER = "[[ready_to_build]]"
 _PARTIAL_MARKER = re.compile(r"\[(\[[^\]]*\]?)?$")
 
 
-def _quick_pick_presets(kind: str) -> list[tuple[str, int]]:
-    """Quick-pick labels from the shared preset values.
+def _latest_assistant_text(messages: list[dict[str, str]]) -> str:
+    """Return the newest assistant message, including its hidden marker."""
+    for message in reversed(messages):
+        if message.get("role") == "assistant":
+            return message.get("content") or ""
+    return ""
 
-    Labels stay "$25", "6 months", and "7 days".
-    """
-    values = CLARIFY_PRESET_VALUES[kind]
+
+def _quick_pick_presets(kind: str, values: tuple[int, ...]) -> list[tuple[str, int]]:
+    """Button labels for the choices the agent sent, or the fallback list."""
     if kind == "amount_usd_lte":
         return [(f"${value}", value) for value in values]
     if kind == "tenure_months_gte":
         return [(f"{value} months", value) for value in values]
     return [(f"{value} days", value) for value in values]
-
-
-_THRESHOLD_LABELS = {
-    "amount_usd_lte": "Maximum refund amount",
-    "tenure_months_gte": "Minimum time as a customer",
-    "days_since_delivery_lte": "Maximum days since delivery",
-}
 
 
 def _strip_clarify_markers(text: str) -> str:
@@ -550,12 +549,22 @@ def _render_policy_builder() -> None:
         st.subheader("Quick pick")
         if blocker:
             st.info(blocker["detail"])
-        st.caption(
-            f"{_THRESHOLD_LABELS[clarify_kind]}. Choose a preset or enter a custom "
-            "value — one clear answer so we do not invent a threshold."
+        _ask_text = blocker["detail"] if blocker else _latest_assistant_text(messages)
+        _parsed = None if blocker else parse_clarify_marker(_ask_text)
+        _values = (
+            _parsed["values"]
+            if _parsed and _parsed["values"]
+            else CLARIFY_PRESET_VALUES[clarify_kind]
         )
-        cols = st.columns(len(CLARIFY_PRESET_VALUES[clarify_kind]) + 1)
-        for index, (label, value) in enumerate(_quick_pick_presets(clarify_kind)):
+        if _parsed and _parsed["topic"]:
+            st.caption(
+                f"{_parsed['topic']}. Choose one of these or enter a custom value — "
+                "one clear answer so we do not invent a threshold."
+            )
+        else:
+            st.caption(clarify_pick_caption(clarify_kind, _ask_text))
+        cols = st.columns(len(_values) + 1)
+        for index, (label, value) in enumerate(_quick_pick_presets(clarify_kind, _values)):
             if cols[index].button(label, key=f"clarify_preset_{clarify_kind}_{value}"):
                 _confirm_pick(clarify_kind, value)
 

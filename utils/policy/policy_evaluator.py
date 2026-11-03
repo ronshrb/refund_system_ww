@@ -8,9 +8,10 @@ from numbers import Integral
 from utils.data.data_processing import REASONS, normalize_reason, parse_amount
 
 
-# review_notes is reviewer guidance stored on the policy. It is not an allow rule.
-_POLICY_KEYS = {"version", "status", "comment", "allow", "review_notes"}
+# review_notes and rule_notes are reviewer guidance. Neither is an allow rule.
+_POLICY_KEYS = {"version", "status", "comment", "allow", "review_notes", "rule_notes"}
 _REVIEW_NOTE_KEYS = {"reason", "text"}
+_RULE_NOTE_KEYS = {"id", "text"}
 _REVIEW_REASONS = REASONS | {"general"}
 _RULE_KEYS = {"id", "action", "all_of"}
 _GROUP_KEYS = {"source_note", "comment", "when"}
@@ -142,6 +143,11 @@ def policy_schema_errors(policy):
                     return [f"{group_where}.when has unsupported condition {operator!r}."]
                 if not _valid_operand(operator, operand):
                     return [f"{group_where}.when.{operator} has invalid value {operand!r}. {_operand_hint(operator)}"]
+    if "rule_notes" in policy:
+        # Absent is valid. Present must name an allow rule that exists on this policy.
+        note_error = _rule_note_error(policy["rule_notes"], seen_rule_ids)
+        if note_error:
+            return [note_error]
     return []
 
 
@@ -164,6 +170,30 @@ def _review_note_error(notes):
                 f"{where}.reason must be one of {sorted(_REVIEW_REASONS)}; "
                 f"got {reason!r}."
             )
+        text = note["text"]
+        if not isinstance(text, str) or not text.strip():
+            return f"{where}.text must be a non-empty string."
+    return None
+
+
+def _rule_note_error(notes, rule_ids):
+    """Return the first ``rule_notes`` schema error, or None when the list is valid.
+
+    A rule note is the manager's words about one allow rule. ``evaluate`` does
+    not read it, so it cannot approve, reject, or block that rule by itself.
+    """
+    if not isinstance(notes, list):
+        return "'rule_notes' must be a list."
+    for index, note in enumerate(notes):
+        where = f"rule_notes[{index}]"
+        if not isinstance(note, Mapping) or set(note) != _RULE_NOTE_KEYS:
+            keys = sorted(note) if isinstance(note, Mapping) else type(note).__name__
+            return f"{where} must have exactly keys {sorted(_RULE_NOTE_KEYS)}; got {keys}."
+        rule_id = note["id"]
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            return f"{where}.id must be a non-empty string."
+        if rule_id not in rule_ids:
+            return f"{where}.id {rule_id!r} does not match an allow rule."
         text = note["text"]
         if not isinstance(text, str) or not text.strip():
             return f"{where}.text must be a non-empty string."
@@ -397,8 +427,9 @@ def evaluate(request, policy, *, already_paid_ids=None):
     send to review. ``already_paid_ids`` must be an explicit collection of
     request IDs (possibly empty); None or malformed routes to review.
     ``approved_amount`` is the Decimal to pay on ``approve_full``, else None.
-    ``review_notes``, when present, are not read: the same allow list with or
-    without them returns the same decision, reason, matched rule, and amount.
+    ``review_notes`` and ``rule_notes``, when present, are not read: the same
+    allow list with or without them returns the same decision, reason, matched
+    rule, and amount.
     """
     version = _policy_version(policy)
     if not validate_policy(policy):
@@ -411,7 +442,7 @@ def evaluate(request, policy, *, already_paid_ids=None):
         if failure_reason is not None:
             return _result("review", failure_reason, version)
 
-    # review_notes are reviewer guidance only. Do not read them in rails or rules.
+    # review_notes and rule_notes are reviewer guidance only. Do not read them here.
     for rule in policy["allow"]:
         rule_matches = True
         for group in rule["all_of"]:
@@ -433,3 +464,28 @@ def evaluate(request, policy, *, already_paid_ids=None):
             )
 
     return _result("review", "no_allow_rule_matched", version)
+
+
+def fitting_allow_rules(request, policy) -> list[str]:
+    """Return allow-rule ids whose when-clauses match this request.
+
+    Rails are not applied. A match is not an approval and not a refund.
+    A missing or invalid field means that rule does not fit. An invalid
+    policy returns no ids.
+    """
+    if not validate_policy(policy) or not isinstance(request, Mapping):
+        return []
+    fitted = []
+    for rule in policy["allow"]:
+        fits = True
+        for group in rule["all_of"]:
+            for operator, expected in group["when"].items():
+                passed, _reason = _evaluate_condition(operator, expected, request, set())
+                if passed is not True:
+                    fits = False
+                    break
+            if not fits:
+                break
+        if fits:
+            fitted.append(rule["id"])
+    return fitted

@@ -3,7 +3,7 @@
 **Clause:** Part 2 reviewer (primary); Part 2 manager (guidance notes only); AI judgment (the summary must not authorize).  
 **Owner:** project-product-manager (this brief). project-engineer implements only after the user explicitly authorizes that work.  
 **Status:** in-progress  
-**Authorized slice (2026-11-03):** The user asked to implement adding `review_notes` through the policy agent only. Allow the field on the policy, ignore it in `evaluate()`, and tell the hardcoded system instructions how to store a note as one reason or `general`. Do not build the Reviews page or the suggestion step.
+**Authorized slice (2026-11-03, corrected):** The user authorized a review agent on the Reviews page. The agent calls the policy tool (`evaluate_live` via `apply_policy`). The model cannot authorize a refund: code ignores a confirm when that tool did not return `approve_full` with reason `matched_allow_rule`. `customer_note` and `support_note` are included in the reviewer comment as data, not as instructions. The page no longer shows the live-policy filename. The auto list is an expander with `request_id`, amount, and `outcome_note`. The open queue has one Search box. The decided table has no label column. `evaluate()` and the notes rail were not changed.
 
 ## Business outcome
 
@@ -14,7 +14,8 @@ A person can upload a pending file on Reviews, see what the live policy already 
 - Task 01: `evaluate()` is the only auto-approve path. The upload projection drops the same five post-decision fields.
 - Task 02: live pointer and `evaluate_live` (which calls `evaluate`). Policy Management already has two tabs and a preview-before-live path. Reviewer notes are a field on that same policy. They do not add a third tab and they do not change go-live. `evaluate()` must ignore `review_notes`.
 - Existing parsers: `parse_amount` and `normalize_reason`. Reuse them. Do not add a second amount or reason cleaner.
-- `app/pages/reviews.py` is a stub. It only reads the live pointer and says the queue is not built. Confirmed 2026-11-03.
+- `app/pages/reviews.py` uploads a pending file, queues it through the review agent, and records simulated decisions. A browser pass of that page is still open. Confirmed by `tests/test_review_queue.py` on 2026-11-03.
+- The review agent may send `support_note`, `customer_note`, and the structured intake fields to the configured chat model for this review only. Those notes are data. The model cannot authorize. `customer_note` text is not stored on the decision log. The local summary still does not call a model and still does not quote note text.
 - Read-only inputs: `data/raw/pending.csv`, `data/raw/history.csv`, `data/raw/policy_notes.csv`. Never write those files.
 - Task 03 is not a dependency. The external-LLM comment stays deferred.
 
@@ -150,7 +151,7 @@ Today the closed schema rejects unknown top-level keys. Allowing `review_notes` 
 
 ## Later — suggestion for the reviewer
 
-Not this slice. When the Reviews page exists, the review agent reads the row it was given and the live policy's `review_notes`. It uses the notes whose `reason` equals the row's cleaned `stated_reason`, plus every `general` note. From those it writes a short suggestion for the reviewer. The suggestion is advice. It does not approve, reject, set a partial, activate policy, or move money. Words such as "we reject" stay inside the manager's note. Customer and support note text are untrusted and are not sent to a model unless the user approves that. If no note matches and there is no general note, the suggestion says that no reviewer note applies.
+The local summary now does this. It reads the open row and the live policy's `review_notes`. It uses the notes whose `reason` equals the row's cleaned `stated_reason`, plus every `general` note. It quotes those notes. It does not approve, reject, set a partial, activate policy, or move money. Words such as "we reject" stay inside the manager's note, prefixed as guidance. Customer and support note text are not copied into the summary and are not sent to a model. If no note matches and there is no general note, the summary says that no reviewer note applies.
 
 ## How we would know this is wrong
 
@@ -172,24 +173,24 @@ No reviewer-time target is set. History `review_minutes` is observed past effort
 
 ## Acceptance checks
 
-QA can execute these. The two review-note checks have focused-test evidence below. Every Reviews-page check is still open, and this task is not done.
+QA can execute these. The two review-note checks were already marked. The Reviews-page checks marked below are what `tests/test_review_queue.py` proved. The browser pass is still open, and this task is not done.
 
-- [ ] With no live pointer, uploading `data/raw/pending.csv` writes no auto decision. The auto list is empty. The open table has 20 rows. `RF-2183` appears once and the detail shows a second uploaded row that was not decided. `data/raw/pending.csv` bytes are unchanged.
-- [ ] With a live policy, the auto-list ids equal a direct `evaluate_live` pass over the same projected rows, minus blank ids, in-file duplicate ids, and ids already logged. Auto rows are absent from the open table. Each auto row shows `request_id`, amount, matched rule, and "Simulated — not a refund."
-- [ ] A live policy with an empty allow list, a missing pointer, an unreadable pointer, and a pointer to a missing file each produce zero auto rows.
-- [ ] An upload that includes the five post-decision columns, filled, gets the same `evaluate_live` result as the same cells with those columns removed. `decision=approved` on the file does not auto-approve and does not block a real evaluate match.
-- [ ] An upload missing one required intake header decides nothing and does not change the decision log.
-- [ ] Uploading the same decided id again adds no second log record and does not put that id back on the open table. The original outcome stays visible.
-- [ ] The open table shows only `request_id`, `requested_at`, and `customer_id`. Filters for those three, `stated_reason`, `category`, `fraud_flag`, and amount min/max behave as specified, including unparseable amounts and min greater than max. Only one row can be selected.
-- [ ] The detail panel shows all 13 intake fields for the selected row.
-- [ ] The summary banner says it is not a decision. It shows `evaluate`'s reason code and the closed sentence. It shows amount, cleaned reason, fraud bucket, and notes-present yes/no. It does not contain the text of `customer_note` or `support_note`. On `RF-1073`, the "pre-approved" / "skip human review" sentence is absent, and the row is not auto-approved.
-- [ ] Similar history for a cleaned reason matches a read-only count on `history.csv`, newest `requested_at` first, at most 8 rows, labeled as observed past decisions. A reason that does not clean shows zero rows.
+- [x] With no live pointer, uploading `data/raw/pending.csv` writes no auto decision. The auto list is empty. The open table has 20 rows. `RF-2183` appears once and the detail shows a second uploaded row that was not decided. `data/raw/pending.csv` bytes are unchanged.
+- [x] With a live policy, the auto-list ids equal a direct `evaluate_live` pass over the same projected rows, minus blank ids, in-file duplicate ids, and ids already logged. Auto rows are absent from the open table. Each auto row shows `request_id`, amount, matched rule, and "Simulated — not a refund."
+- [x] A live policy with an empty allow list, a missing pointer, an unreadable pointer, and a pointer to a missing file each produce zero auto rows.
+- [x] An upload that includes the five post-decision columns, filled, gets the same `evaluate_live` result as the same cells with those columns removed. `decision=approved` on the file does not auto-approve and does not block a real evaluate match.
+- [x] An upload missing one required intake header decides nothing and does not change the decision log.
+- [x] Uploading the same decided id again adds no second log record and does not put that id back on the open table. The original outcome stays visible.
+- [x] The open table shows only `request_id`, `requested_at`, and `customer_id`. Filters for those three, `stated_reason`, `category`, `fraud_flag`, and amount min/max behave as specified, including unparseable amounts and min greater than max. Only one row can be selected.
+- [x] The detail panel shows all 13 intake fields for the selected row.
+- [x] The summary banner says it is not a decision. It shows `evaluate`'s reason code and the closed sentence. It shows amount, cleaned reason, fraud bucket, and notes-present yes/no. It does not contain the text of `customer_note` or `support_note`. On `RF-1073`, the "pre-approved" / "skip human review" sentence is absent, and the row is not auto-approved.
+- [x] Similar history for a cleaned reason matches a read-only count on `history.csv`, newest `requested_at` first, at most 8 rows, labeled as observed past decisions. A reason that does not clean shows zero rows.
 - [x] The never-arrived example is stored as `review_notes` on the draft policy with `reason` `never_arrived` and the manager's text unchanged. A note the agent cannot tie to one reason is stored with `reason` `general`. A reason outside the six and `general` does not save.
 - [x] The same allow list with and without `review_notes` gets the same `evaluate` result. Adding, editing, or removing a review note does not write `data/raw/policy_notes.csv` and does not write `policies/live_pointer.json`. The note is not live until the manager confirms that policy file.
-- [ ] Approve full on a selected row with a usable amount records one simulated reviewer decision, clears the row from the open table, and shows the outcome with "Simulated — not a refund." The same click on an unparseable amount records nothing.
-- [ ] Partial above the requested amount, blank, or unparseable records nothing and leaves the row open. A partial equal to the requested amount records. Reject records no amount. A note over 280 characters records nothing.
-- [ ] Actions apply only to the selected row. There is no bulk action.
-- [ ] No test and no page on this slice sends a customer record, `customer_note`, or `support_note` to an external model. The summary path has no provider call.
+- [x] Approve full on a selected row with a usable amount records one simulated reviewer decision, clears the row from the open table, and shows the outcome with "Simulated — not a refund." The same click on an unparseable amount records nothing.
+- [x] Partial above the requested amount, blank, or unparseable records nothing and leaves the row open. A partial equal to the requested amount records. Reject records no amount. A note over 280 characters records nothing.
+- [x] Actions apply only to the selected row. There is no bulk action.
+- [x] No test and no page on this slice sends a customer record, `customer_note`, or `support_note` to an external model. The summary path has no provider call.
 - [ ] Focused tests cover the checks above without a browser where the behavior is in functions, and a browser pass covers upload, filter, select, summary, one of each decision, and a guidance edit. Source CSV hashes are recorded before and after.
 
 ## Explicit cuts
@@ -215,7 +216,7 @@ QA can execute these. The two review-note checks have focused-test evidence belo
 
 ## Remaining limitations
 
-- Status stays in-progress. The side-file guidance code was not kept. Focused tests cover `review_notes` on the draft. The Reviews page, the suggestion agent, and a browser pass are still deferred.
+- Status stays in-progress. The side-file guidance code was not kept. Focused tests cover `review_notes` on the draft and the queue functions, including the review agent's hold and the note rail. The Reviews page is built. A browser pass of upload, search, select, the agent comment, one of each decision, and a guidance edit is still open. The task is not done.
 - The sample is not full volume. Historical decisions are not labels. The summary's history count can repeat a wrong past decision inside the cap of 8.
 - One stopping reason hides later allow-rule misses. A reviewer who needs every failed operator still has the raw intake fields.
 - A note marked `general` appears on every reviewed row. A note linked to the wrong reason is missing on the row that needed it. The manager can see the stored reason before the policy goes live.
@@ -237,3 +238,43 @@ Result: Ran 57 tests in 0.141s — OK.
 2026-11-03 — The hardcoded instructions no longer wait for the manager to say "note for reviewers." A pasted list is split into clauses. A clause that pays without a person and fits the schema becomes an allow rule. A clause that tells a person what to check becomes one review note. Compound sentences are split. Unclear clauses are asked about, one question at a time, and left out of the candidate. Instruction tests: `tests.test_policy_agent.PolicyAgentHostTests.test_instructions_describe_review_notes_as_guidance` and `test_clarification_guidance_encoded_in_system_instructions` — OK. A live model was not called.
 
 The two `review_notes` checks above are the only ones marked from this run. A template draft that only adds the never-arrived sentence returns `proposed`, keeps `allow` unchanged, and stores that text with `reason` `never_arrived`. A candidate already marked `general` is stored the same way. The instructions say to use `general` when a note names no reason or more than one, including cosmetic damage and late delivery. A reason outside the six and `general` returns `invalid` and does not replace the draft. The same allow list with and without notes returns the same `decision`, `reason`, `matched_rule`, and `approved_amount` for one matching request and one non-matching request. Adding, editing, and removing a note left `data/raw/policy_notes.csv` and `policies/live_pointer.json` unchanged. A live model was not called. Every Reviews-page check stays open.
+
+2026-11-03 — Part 2 reviewer slice: the Reviews page queues an upload through `evaluate_live`, shows a local summary, and records simulated decisions. `evaluate()` and the policy agent were not changed. A live model was not called. Tests use a temp policies directory and a temp decision log. `data/raw` bytes and `policies/live_pointer.json` were unchanged at the end of every test. The browser pass is still open. Status stays in-progress.
+
+Command:
+
+`.\.venv\Scripts\python.exe -m unittest tests.test_review_queue`
+
+Result: Ran 12 tests in 0.068s — OK.
+
+The marked Reviews-page checks are the ones those tests executed: missing header, post-decision columns dropped before `evaluate_live`, no live policy on a duplicate fixture and on `data/raw/pending.csv` (20 open ids, `RF-2183` once, zero autos, source bytes unchanged), unusable live policies, auto ids equal to a direct `evaluate_live` pass excluding duplicates and already-logged ids, a second upload does not add a second log record, partial bounds and the 280-character note, approve full, the summary omits RF-1073's "pre-approved" / "skip human review" text, a `never_arrived` note is quoted only for that reason and a `general` note is quoted too, and similar history cap, sort, and unrecognized reason. The browser checkbox stays open.
+
+2026-11-03 — Corrected Part 2 reviewer slice: a review agent reviews each eligible uploaded row. It calls `apply_policy`, which runs `evaluate_live`. The model cannot authorize. A confirm is recorded only when that tool returned `approve_full` with reason `matched_allow_rule` and the outcome note is a non-empty string of at most 280 characters. `matched_rule` on the auto record is null. `customer_note` and `support_note` are included in the open-row reviewer comment as data, with manager review notes. Past decisions come from the same `query_history` tool the policy drafter uses: the tool reads `history.csv`, and the review agent is not handed the history rows. A note that says to skip human review is quoted and marked as not followed. Duplicates and already-logged ids do not reach the agent. The page caches the agent result on the upload token. `evaluate()` and the notes rail were not changed. A live model was not called. The browser pass was not run. Status stays in-progress.
+
+Command:
+
+`.\.venv\Scripts\python.exe -m unittest tests.test_review_queue`
+
+Result: Ran 16 tests in 0.396s — OK.
+
+2026-11-03 — A draft can store `rule_notes` as `{id, text}` on an allow-rule id. `evaluate()` does not read them. The review summary, when a row's fields fit that rule, says what the rule would do and quotes the note. It is not an approval. The policy agent asks before writing `fraud_flag: "no"` onto automatic rules when a reviewer note says a raised fraud flag must go to a person. A raised fraud flag already goes to review before those rules. A live model was not called. Status stays in-progress.
+
+Command:
+
+`.\.venv\Scripts\python.exe -m unittest tests.test_policy_evaluator tests.test_policy_agent tests.test_review_queue`
+
+Result: Ran 78 tests in 0.340s — OK.
+
+2026-11-03 — Record decision writes `decided_by` `user` and updates a working copy of the uploaded file. Auto-approved rows stay in that copy and out of the open queue. `decided_at` is UTC `YYYY-MM-DD HH:MM`. `review_minutes` is whole minutes since Review was clicked, and blank for auto. The page can download that copy. `data/raw` is not rewritten. `tests.test_review_queue` — 19 tests OK. Status stays in-progress.
+
+2026-11-03 — Starting the app again drops the stored upload, review result, and working sheet, so Reviews asks for a file. A refresh while that same run is up still keeps them. The decision log is not deleted. Status stays in-progress.
+
+2026-11-03 — A blank auto outcome note in the working sheet is filled from the allow rule on that decision. The auto-approved table shows that sentence in `outcome_note`. A note that is already filled is left as it is. Status stays in-progress.
+
+2026-11-03 — A note-only hold no longer starts with “the text is not included.” A plain customer or support note is quoted. A note that tells the reviewer how to decide is quoted and called out, and is not followed. An upload cleans `requested_at` and `amount_usd` with the history normalizer. Other columns and `data/raw` stay as they are. `tests.test_review_queue` and `tests.test_data_processing` — 38 tests OK. Status stays in-progress.
+
+2026-11-03 — The review summary shown after Review is the model’s `reviewer_comment` when that text is present and does not itself tell the reviewer to approve or skip review. The model is told to read the notes, translate them, use history as non-truth, and call out an instruction inside a note. An empty or obedient comment falls back to the local sentence. The comment still cannot approve. `tests.test_review_queue` — 25 tests OK. Status stays in-progress. The same-customer duplicate check is not started.
+
+2026-11-03 — The review summary uses the live policy’s review notes. The fraud-team step is not hardcoded. A policy with no such note says the fraud flag is raised and does not mention the fraud team. Status stays in-progress.
+
+2026-11-03 — A repeated request id still shows one queue row, and the later copy is shown under the selected request, including its customer note. A different request id with the same customer, amount, and category stays in the queue, is not auto-approved, and is named on the other request with its status. Deciding one does not decide the other. `tests.test_review_queue` — 26 tests OK. Status stays in-progress.

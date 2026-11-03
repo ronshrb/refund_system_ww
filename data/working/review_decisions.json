@@ -1,0 +1,35 @@
+[
+  {
+    "request_id": "RF-1069",
+    "action": "approve_full",
+    "amount": "25.00",
+    "note": "",
+    "decided_by": "auto",
+    "decided_at": "2026-11-03T12:31:04Z",
+    "matched_rule": "small_stuff_good_customers",
+    "policy_file": "small-stuff-good-customers-changed-mind-14d-arrive.json",
+    "simulated": true
+  },
+  {
+    "request_id": "RF-1067",
+    "action": "approve_full",
+    "amount": "320.00",
+    "note": "",
+    "decided_by": "auto",
+    "decided_at": "2026-11-03T12:38:08Z",
+    "matched_rule": "never_arrived_signature",
+    "policy_file": "small-stuff-30-changed-mind-14d-arrived-damaged-ph.json",
+    "simulated": true
+  },
+  {
+    "request_id": "RF-1068",
+    "action": "approve_full",
+    "amount": "290.00",
+    "note": "",
+    "decided_by": "auto",
+    "decided_at": "2026-11-03T12:38:08Z",
+    "matched_rule": "never_arrived_signature",
+    "policy_file": "small-stuff-30-changed-mind-14d-arrived-damaged-ph.json",
+    "simulated": true
+  }
+]

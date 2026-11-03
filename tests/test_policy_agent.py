@@ -239,7 +239,7 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertIn("Do not add conditions the manager did not mention", collapsed)
         self.assertIn("history_evidence", collapsed)
         self.assertIn("one clear ask", collapsed)
-        self.assertIn("[[clarify:tenure_months_gte]]", collapsed)
+        self.assertIn("[[clarify:tenure_months_gte|", collapsed)
         self.assertIn("are not automatically", collapsed)
         self.assertIn("Call query_history for each plausible reading", collapsed)
         self.assertIn("Picking error is not a stated reason", collapsed)
@@ -587,6 +587,9 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertIn("cosmetic damage", instructions)
         self.assertIn("late delivery", instructions)
         self.assertIn("could be an automatic refund or a note", instructions)
+        self.assertIn("rule_notes", instructions)
+        self.assertIn("clear fraud flag", instructions)
+        self.assertIn("Ask once whether every", instructions)
         self.assertNotIn("When the manager asks to add a note for reviewers", instructions)
         self.assertNotIn("Do not invent an unconfirmed threshold", instructions)
         self.assertNotIn("[[ready_to_build]]", instructions)
@@ -619,6 +622,10 @@ class PolicyAgentHostTests(unittest.TestCase):
                 "general",
             },
         )
+        rule_notes = candidate["properties"]["rule_notes"]
+        self.assertEqual(rule_notes["type"], "array")
+        self.assertEqual(rule_notes["items"]["required"], ["id", "text"])
+        self.assertNotIn("rule_notes", candidate["required"])
 
     def test_review_note_on_template_draft_is_proposed_and_keeps_allow(self):
         protected = _protected_bytes()
@@ -704,23 +711,18 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertEqual(_protected_bytes(), protected)
 
     def test_instructions_offer_shared_clarification_presets(self):
-        from utils.policy.policy_agent_utils import CLARIFY_PRESET_VALUES
-
         instructions = policy_agent.SYSTEM_INSTRUCTIONS
         self.assertNotIn("__CLARIFY_PRESET_BULLETS__", instructions)
         self.assertNotIn("__CLARIFY_AMOUNT_PRESETS__", instructions)
-        amounts = ", ".join(
-            f"${value}" for value in CLARIFY_PRESET_VALUES["amount_usd_lte"]
+        self.assertIn(
+            "[[clarify:amount_usd_lte|Small stuff from good customers|25,30,50]]",
+            instructions,
         )
-        tenure_values = CLARIFY_PRESET_VALUES["tenure_months_gte"]
-        tenure = ", ".join(str(value) for value in tenure_values[:-1])
-        tenure = f"{tenure}, or {tenure_values[-1]}"
-        window_values = CLARIFY_PRESET_VALUES["days_since_delivery_lte"]
-        window = ", ".join(str(value) for value in window_values[:-1])
-        window = f"{window}, or {window_values[-1]}"
-        self.assertIn(f"{amounts}, or custom", instructions)
-        self.assertIn(f"{tenure} months, or custom", instructions)
-        self.assertIn(f"{window}\n    days, or custom", instructions)
+        self.assertIn(
+            "[[clarify:tenure_months_gte|how long they have been a customer|6,12,24]]",
+            instructions,
+        )
+        self.assertIn("The page shows that topic and those buttons", instructions)
 
     def test_mocked_cannot_express_preserves_draft_in_turn(self):
         current = _template_draft()
@@ -856,6 +858,39 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertEqual(state["policy_management_messages"], [])
         self.assertEqual(state["policy_management_draft"], _template_draft())
         self.assertIsNone(state["policy_management_preview_summary"])
+
+    def test_quick_pick_caption_names_the_question_topic(self):
+        from utils.policy.policy_agent_utils import clarify_pick_caption
+
+        reply = (
+            "Here's how I will draft the policy:\n\n"
+            "Small stuff from good customers: I will need a specific refund\n"
+            "amount to define what cheap means. Please confirm if it should\n"
+            "be $25, $30, $50, or another amount.\n\n"
+            "Picking error: This will be included as a reviewer note.\n"
+            "[[clarify:amount_usd_lte]]"
+        )
+        caption = clarify_pick_caption("amount_usd_lte", reply)
+        self.assertTrue(caption.startswith("Small stuff from good customers."))
+        self.assertNotIn("Maximum refund amount", caption)
+
+        plain = "What refund amount should count: $25, $30, $50, or another amount?"
+        plain_caption = clarify_pick_caption("amount_usd_lte", plain)
+        self.assertTrue(plain_caption.startswith("What refund amount should count."))
+        self.assertNotIn("Maximum refund amount", plain_caption)
+
+        from utils.policy.policy_agent_utils import parse_clarify_marker
+
+        parsed = parse_clarify_marker(
+            "[[clarify:amount_usd_lte|Small stuff from good customers|15,40]]"
+        )
+        self.assertEqual(parsed["kind"], "amount_usd_lte")
+        self.assertEqual(parsed["topic"], "Small stuff from good customers")
+        self.assertEqual(parsed["values"], (15, 40))
+        bare = parse_clarify_marker("[[clarify:amount_usd_lte]]")
+        self.assertEqual(bare["kind"], "amount_usd_lte")
+        self.assertIsNone(bare["topic"])
+        self.assertIsNone(bare["values"])
 
 
 if __name__ == "__main__":
