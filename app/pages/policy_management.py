@@ -17,14 +17,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from decimal import Decimal
+
 from utils.data.dataloader import load_rows
 from utils.policy import policy_agent
+
 from utils.policy.live_policy import (
-    has_auto_approve_rules,
+    approvals_csv,
+    auto_approval_split,
+    historical_auto_approvals,
+    history_outcome_rates,
     list_policy_files,
     make_live,
     preview_auto_approvals,
-    read_live_policy,
 )
 from utils.policy.policy_agent_utils import (
     CLARIFY_MARKER_PATTERN,
@@ -36,6 +41,13 @@ from utils.policy.policy_agent_utils import (
 from utils.policy.policy_preview import PolicyInputError, parse_policy_file
 
 _SESSION_MESSAGES_KEY = "policy_management_messages"
+# Shown as the first chat bubble. Not stored in the transcript the model sees.
+_BUILDER_INTRO = (
+    "Describe the refund rule you want, and be clear about amounts, reasons, "
+    "and who it applies to. Suggestions here are based on the history data "
+    "and do not approve a refund. To compare policies and choose which one "
+    "is live, use the Policy Picker tab."
+)
 _SESSION_DRAFT_KEY = "policy_management_draft"
 _SESSION_PREVIEW_KEY = "policy_management_preview_summary"
 _SESSION_CONFIRMED_KEY = "policy_management_confirmed_thresholds"
@@ -215,45 +227,192 @@ def _load_candidate(file_name: str):
         return None, "This file is not a usable policy. Nothing would auto-approve."
 
 
-def _render_match_count(matches, *, history_ready: bool) -> None:
-    if not history_ready:
+def _percent_label(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.1f}%"
+
+
+def _request_change_label(value: int) -> str:
+    """Request-count change with no leading plus."""
+    noun = "request" if abs(value) == 1 else "requests"
+    if value < 0:
+        return f"-{abs(value)} {noun}"
+    return f"{value} {noun}"
+
+
+def _money_change_label(value) -> str:
+    """Dollar change with no leading plus. A decrease keeps the minus."""
+    amount = Decimal(value)
+    if amount < 0:
+        return f"-${abs(amount):,.2f}"
+    return f"${amount:,.2f}"
+
+
+def _money_label(value) -> str:
+    if value is None:
+        return "—"
+    return f"${Decimal(value):,.2f}"
+
+
+def _percent_change_label(selected, other) -> str:
+    """Selected policy minus the compared side, divided by the compared side."""
+    if selected is None or other is None or other == 0:
+        return "—"
+    change = (Decimal(selected) - Decimal(other)) / Decimal(other)
+    return f"{change * 100:.1f}%"
+
+
+def _outcome_rates(policy, history_rows):
+    """Score a policy, or no policy, on the history rows."""
+    if history_rows is None:
+        return None
+    return history_outcome_rates(policy, history_rows)
+
+
+def _render_download(matches, file_name: str) -> None:
+    if not matches:
         return
-    count = len(matches)
-    noun = "row" if count == 1 else "rows"
-    st.write(f"{count} history {noun} would auto-approve.")
+    st.download_button(
+        "Download",
+        data=approvals_csv(matches),
+        file_name=f"{Path(file_name).stem}-auto-approved.csv",
+        mime="text/csv",
+        key=f"download-{file_name}",
+    )
+
+
+def _render_policy_side(
+    title, policy, matches, history_rows, file_name, *, recorded: bool = False
+) -> None:
+    """One summary line: name, rates, row count, and the download."""
+    rates = _outcome_rates(policy, history_rows)
+    parts = [f"**{title}**"]
+    if rates is not None:
+        parts.append(f"Auto-approved {_percent_label(rates['percent_auto_approved'])}")
+        parts.append(
+            f"Auto-refund dollars {_money_label(rates['auto_refund_dollars'])}"
+        )
+    if history_rows is not None:
+        count = len(matches)
+        noun = "row" if count == 1 else "rows"
+        verb = "were auto-approved" if recorded else "would auto-approve"
+        parts.append(f"{count} history {noun} {verb}.")
+    line_col, download_col = st.columns([5, 1], vertical_alignment="center")
+    line_col.markdown(_markdown_safe(" · ".join(parts)))
+    if file_name and matches:
+        with download_col:
+            _render_download(matches, file_name)
+
+
+def _render_comparison(selected_rates, other_rates) -> None:
+    """Percent change beside each change. The fee is noted under the dollar change."""
+    if selected_rates is None or other_rates is None:
+        return
+    approved_change = selected_rates["auto_approved"] - other_rates["auto_approved"]
+    dollar_change = (
+        selected_rates["auto_refund_dollars"] - other_rates["auto_refund_dollars"]
+    )
+    fee_change = selected_rates["fee_dollars"] - other_rates["fee_dollars"]
+    percent_col, change_col = st.columns(2)
+    percent_col.metric(
+        "Auto-approved percent change",
+        _percent_change_label(
+            selected_rates["auto_approved"], other_rates["auto_approved"]
+        ),
+    )
+    change_col.metric("Auto-approved change", _request_change_label(approved_change))
+    percent_col, change_col = st.columns(2)
+    percent_col.metric(
+        "Auto-refund dollar percent change",
+        _percent_change_label(
+            selected_rates["auto_refund_dollars"],
+            other_rates["auto_refund_dollars"],
+        ),
+    )
+    change_col.metric(
+        "Auto-refund dollar change",
+        _money_change_label(dollar_change),
+    )
+    # The fee is $25 per auto refund. Show only its share of this dollar change.
+    _, fee_col = st.columns(2)
+    fee_col.markdown(_markdown_safe(f"{_money_change_label(fee_change)} of this is fees"))
+
+
+def _render_auto_split(selected_matches, other_matches) -> None:
+    """The net change split into new auto-approvals, ones that leave, and ones that stay."""
+    split = auto_approval_split(selected_matches, other_matches)
+    new_col, dropped_col, still_col = st.columns(3)
+    _split_figure(new_col, "Newly auto-approved", split["new_count"], split["new_dollars"])
+    _split_figure(
+        dropped_col,
+        "No longer auto-approved",
+        split["dropped_count"],
+        split["dropped_dollars"],
+    )
+    _split_figure(
+        still_col, "Still auto-approved", split["still_count"], split["still_dollars"]
+    )
+
+
+def _split_figure(column, title: str, count, dollars) -> None:
+    noun = "request" if count == 1 else "requests"
+    column.markdown(
+        _markdown_safe(f"**{title}** · {count} {noun} · {_money_label(dollars)}")
+    )
+
+
+_NO_COMPARE = "__no_compare__"
+_WITHOUT_POLICY = "__without_policy__"
+
+
+def _policy_choice_label(files, name: str) -> str:
+    if name == _NO_COMPARE:
+        return "Don't compare"
+    if name == _WITHOUT_POLICY:
+        return "Without policy"
+    item = next(entry for entry in files if entry["file"] == name)
+    if item.get("status"):
+        return f"{item['file']} ({item['status']})"
+    return f"{item['file']} (no status)"
 
 
 def _render_policy_picker() -> None:
     """Select and preview a policy. Only the button writes the live pointer."""
-    st.caption(
-        "Choosing a file previews it. The live policy changes only when you "
-        "click Make this the live policy."
-    )
-    st.caption(
-        "Preview uses intake fields only. Past decisions in the history file "
-        "are not eligibility labels."
-    )
     files = list_policy_files()
-    live = read_live_policy()
     history_rows, history_error = _history_rows()
     selected = None
+    compare_with = _NO_COMPARE
     if not files:
         st.warning("No policy files in policies/.")
     else:
-        selected = st.selectbox(
-            "Policy file",
-            options=[item["file"] for item in files],
-            format_func=lambda name: next(
-                (
-                    f"{item['file']} ({item['status']})"
-                    if item.get("status")
-                    else f"{item['file']} (no status)"
-                )
-                for item in files
-                if item["file"] == name
-            ),
-            key="policy_picker_selection",
-        )
+        file_col, compare_col = st.columns(2)
+        with file_col:
+            selected = st.selectbox(
+                "Policy file",
+                options=[item["file"] for item in files],
+                format_func=lambda name: _policy_choice_label(files, name),
+                key="policy_picker_selection",
+            )
+            make_clicked = st.button(
+                "Make this the live policy",
+                type="primary",
+                key="make_this_the_live_policy",
+            )
+        with compare_col:
+            compare_with = st.selectbox(
+                "Compare with",
+                options=[_NO_COMPARE, _WITHOUT_POLICY, *[item["file"] for item in files]],
+                format_func=lambda name: _policy_choice_label(files, name),
+                key="policy_picker_compare",
+            )
+        if selected and make_clicked:
+            try:
+                make_live(selected)
+            except (OSError, ValueError) as error:
+                st.error(f"Not made live: {error}")
+            else:
+                st.rerun()
 
     candidate = None
     candidate_error = None
@@ -264,61 +423,52 @@ def _render_policy_picker() -> None:
     if candidate is not None and history_rows is not None:
         candidate_matches = preview_auto_approvals(candidate, history_rows)
 
-    live_matches = []
-    live_can_auto = live is not None and has_auto_approve_rules(live["policy"])
-    if live_can_auto and history_rows is not None:
-        live_matches = preview_auto_approvals(live["policy"], history_rows)
+    comparing = compare_with != _NO_COMPARE
+    other_policy = None
+    other_error = None
+    other_name = "Without policy"
+    if comparing and compare_with != _WITHOUT_POLICY:
+        other_name = compare_with
+        other_policy, other_error = _load_candidate(compare_with)
+
+    other_matches = []
+    other_recorded = compare_with == _WITHOUT_POLICY
+    if comparing and history_rows is not None and other_recorded:
+        other_matches = historical_auto_approvals(history_rows)
+    elif comparing and other_policy is not None and history_rows is not None:
+        other_matches = preview_auto_approvals(other_policy, history_rows)
 
     if history_error:
         st.warning(history_error)
+    if candidate_error:
+        st.error(candidate_error)
+    if other_error:
+        st.error(other_error)
 
-    candidate_column, live_column = st.columns(2)
-    with candidate_column:
-        st.markdown("**Candidate**")
-        if selected:
-            st.caption(selected)
-        if candidate_error:
-            st.error(candidate_error)
-        _render_match_count(candidate_matches, history_ready=history_rows is not None)
-        if candidate_matches:
-            st.dataframe(
-                [
-                    {
-                        "Request": row["request_id"],
-                        "Amount": row["amount_usd"],
-                        "Why": row["why"],
-                    }
-                    for row in candidate_matches
-                ],
-                hide_index=True,
-            )
-        elif candidate is not None and history_rows is not None:
-            st.caption("No history rows would auto-approve under this file.")
-    with live_column:
-        st.markdown("**Live now**")
-        if not live_can_auto:
-            # No pointer, an unusable file, or an empty allow list: do not invent one.
-            st.info("No live policy. Every request would go to review.")
-            if live is not None:
-                st.caption(
-                    f"Pointer file: {live['file']} has no auto-approve rules."
-                )
-        else:
-            st.caption(f"Live policy: {live['file']}")
-        shown_live_matches = live_matches if live_can_auto else []
-        _render_match_count(shown_live_matches, history_ready=history_rows is not None)
-
-    if selected and st.button(
-        "Make this the live policy",
-        type="primary",
-        key="make_this_the_live_policy",
-    ):
-        try:
-            make_live(selected)
-        except (OSError, ValueError) as error:
-            st.error(f"Not made live: {error}")
-        else:
-            st.rerun()
+    if comparing:
+        _render_comparison(
+            _outcome_rates(candidate, history_rows),
+            _outcome_rates(other_policy, history_rows),
+        )
+        if candidate is not None and history_rows is not None and (
+            other_recorded or other_policy is not None
+        ):
+            _render_auto_split(candidate_matches, other_matches)
+        _render_policy_side(
+            other_name,
+            other_policy,
+            other_matches,
+            history_rows,
+            "history-auto" if other_recorded else f"compare-{compare_with}",
+            recorded=other_recorded,
+        )
+    _render_policy_side(
+        selected or "Selected",
+        candidate,
+        candidate_matches,
+        history_rows,
+        selected or "",
+    )
 
 
 def _render_policy_builder() -> None:
@@ -334,21 +484,16 @@ def _render_policy_builder() -> None:
     st.session_state.setdefault(_SESSION_NAME_STEP_KEY, False)
     st.session_state.setdefault(_SESSION_BLOCKER_KEY, None)
 
-    st.caption("Draft and preview policy changes. Does not approve refunds.")
-
-    if policy_agent.llm_configured():
-        st.caption(f"Model: {policy_agent.provider_settings()['label']}")
-    else:
+    if not policy_agent.llm_configured():
         st.info(policy_agent.offline_message())
-
-    with st.expander("Current session draft", expanded=False):
-        st.json(st.session_state[_SESSION_DRAFT_KEY])
 
     preview = st.session_state.get(_SESSION_PREVIEW_KEY)
     if preview:
         st.markdown(policy_agent.format_preview_summary_for_manager(preview))
 
     messages = st.session_state[_SESSION_MESSAGES_KEY]
+    with st.chat_message("assistant"):
+        st.markdown(_BUILDER_INTRO)
     for message in messages:
         with st.chat_message(message["role"]):
             if message["role"] == "assistant":

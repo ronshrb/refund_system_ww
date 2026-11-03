@@ -1,5 +1,7 @@
 # 03 — Agent comments for reviewer assistance
 
+**Pointer (2026-11-03):** The reviewer queue and the local deterministic summary are specified in [`tasks/05-reviewer-queue.md`](05-reviewer-queue.md). This task's external-LLM comment stays deferred until the user approves sending case text to a provider. The task 05 summary is not this comment: it does not call a model, and it must not authorize a refund.
+
 Owner: project-product-manager (requirements); project-engineer (implementation)
 Status: not-started
 Dependencies: a working reviewer queue and an explicit decision on whether request text may be sent to an external LLM provider.

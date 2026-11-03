@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from utils.policy.live_policy import (
@@ -10,6 +11,10 @@ from utils.policy.live_policy import (
     explain_rule,
     list_policy_files,
     make_live,
+    approvals_csv,
+    auto_approval_split,
+    historical_auto_approvals,
+    history_outcome_rates,
     preview_auto_approvals,
 )
 
@@ -181,3 +186,66 @@ class LivePolicyTests(unittest.TestCase):
         self.assertIn("Changed mind", matches[0]["why"])
         self.assertNotIn("amount_usd_lte", matches[0]["why"])
         self.assertNotIn("days_since_delivery_lte", matches[0]["why"])
+
+    def test_outcome_rates_use_past_auto_and_response_wait(self):
+        rows = [
+            _matching_request(request_id="RF-still", decided_by="auto", decision="approved"),
+            _matching_request(
+                request_id="RF-drop",
+                amount_usd="$500.00",
+                decided_by="Auto",
+                decision="approved",
+            ),
+            _matching_request(
+                request_id="RF-sooner",
+                decided_by="J. Alvarez",
+                decision="approved",
+                requested_at="2026-06-01",
+                decided_at="2026-06-03 16:06",
+                review_minutes="18",
+            ),
+            _matching_request(
+                request_id="RF-human-not-auto",
+                amount_usd="$500.00",
+                decided_by="S. Kwan",
+                requested_at="2026-06-01",
+                decided_at="2026-06-05 10:00",
+            ),
+            _matching_request(request_id="RF-dup", decided_by="auto"),
+            _matching_request(request_id="RF-dup", decided_by="J. Alvarez"),
+        ]
+        rates = history_outcome_rates(_MATCHING_POLICY, rows)
+        self.assertEqual(rates["considered"], 4)
+        self.assertEqual(rates["auto_approved"], 2)
+        self.assertEqual(rates["percent_auto_approved"], 50.0)
+        # Dated rows: the policy answers the 2-day request immediately and leaves the 4-day request.
+        self.assertEqual(rates["average_response_days"], 2.0)
+        self.assertEqual(rates["auto_refund_dollars"], Decimal("130.00"))
+        self.assertEqual(rates["fee_dollars"], Decimal("50.00"))
+        none = history_outcome_rates(None, rows)
+        self.assertEqual(none["considered"], 4)
+        self.assertEqual(none["auto_approved"], 2)
+        self.assertEqual(none["percent_auto_approved"], 50.0)
+        self.assertEqual(none["average_response_days"], 3.0)
+        self.assertEqual(none["auto_refund_dollars"], Decimal("590"))
+        self.assertEqual(none["fee_dollars"], Decimal("50"))
+        recorded = historical_auto_approvals(rows)
+        self.assertEqual(
+            [row["request_id"] for row in recorded], ["RF-still", "RF-drop"]
+        )
+        csv_text = approvals_csv(
+            preview_auto_approvals(_MATCHING_POLICY, rows)
+        )
+        self.assertIn("RF-sooner", csv_text)
+        self.assertIn("response_days", csv_text)
+        self.assertNotIn("review_minutes", csv_text)
+        split = auto_approval_split(
+            preview_auto_approvals(_MATCHING_POLICY, rows),
+            historical_auto_approvals(rows),
+        )
+        self.assertEqual(split["still_count"], 1)
+        self.assertEqual(split["still_dollars"], Decimal("65.00"))
+        self.assertEqual(split["new_count"], 1)
+        self.assertEqual(split["new_dollars"], Decimal("65.00"))
+        self.assertEqual(split["dropped_count"], 1)
+        self.assertEqual(split["dropped_dollars"], Decimal("525.00"))

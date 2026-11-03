@@ -92,6 +92,29 @@ Observed: `Ran 71 tests in 0.127s` — `OK`.
 - Policy file SHA256 unchanged by that click: `auto-approve.example.json` `524AA209C633886032AD65C5232BD74A52376E1C359137BE44C1B66231D4D17F`; `policy.template.json` `BB4967F12ED6D0E5FBFEE2D9E622E654796AF0981922784951A0F161A4B48DDD`; `test1.json` `172D127FE0CE1C0D20B9EE75D96CACB8A2B7A902938A55DC47D5DF0513E1B3F3`.
 - `data/raw/history.csv` SHA256 before and after the unittest: `908EF39A0BF690781B0B034B53ABD6C1EACF5DFD740AE8B1D17EAFF20E5DD5B5`. `data/raw/pending.csv` and `data/raw/policy_notes.csv` could not be hashed; Windows reported each file in use by another process. This slice does not open those CSVs for write. `data/raw/data_dictionary.csv` was hashed once after the tests (`662D2653FF67FC71FE2301EBFBF5859FF1721BB09E8B54627C393D4359572234`); a before-hash was not captured.
 
+### Evidence / results — picker metrics (2026-11-03)
+
+- Right and wrong rates use only history rows with `decided_by` auto, after duplicate request ids are skipped. They are shares of that cohort, not of every history row. `review_minutes` is not used.
+- Response time shortened is the wait from `requested_at` to `decided_at`, summed for rows this policy would auto-approve that a person decided. A date-only request counts whole calendar days. A negative gap is left out. Auto is treated as answering when the request arrived.
+- The history table is gone. Those rows download as CSV (`request_id`, `amount_usd`, `why`, `past_decided_by`, `response_days`).
+- Compare with live now sits beside the policy dropdown and the Make live button. On, the selected file and the live policy are side by side, with selected-minus-live underneath.
+- Tests: `.\.venv\Scripts\python.exe -m unittest tests.test_live_policy` — `Ran 8 tests in 0.010s` — `OK`.
+- Browser on `http://localhost:8501/policy_management`: example policy showed Still auto-approved 6.4%, No longer auto-approved 93.6%, Response time shortened 3.0 days, and 10 history rows, with a download and no table. With compare on and `policy.template.json` selected against live `auto-approve.example.json`, the template side was 0.0 days and 0 rows, the live side stayed 3.0 days and 10 rows, and the gap was -6.4 points, +6.4 points, and -3.0 days. Make live was not clicked. The live pointer was already `auto-approve.example.json` and was left as found.
+
+### Evidence / results — history comparison metrics (2026-11-03)
+
+- Each policy is scored on the same history rows, duplicate request ids skipped. Auto-approved is that share. The comparison change is a request count.
+- Response time shortened is the average wait from request to the past decision. Rows the policy would auto-approve contribute that wait. Every other dated row contributes zero. Auto would have answered when the request arrived.
+- Auto-refund dollars are the request amount plus a $25 fee per auto-approved refund. The fee is the manager's stated handling cost, not a column in the CSVs. The comparison shows selected dollars divided by the other policy. A zero denominator is left blank.
+- Compare with lists the policy files and Without policy. Without policy uses history rows whose `decided_by` is auto. It does not write the live pointer.
+- Average response time is `decided_at` minus `requested_at`. A policy file counts a row it would auto-approve as answered when the request arrived. The history baseline keeps the recorded gap. The comparison is how much shorter the selected average is.
+- Tests: `.\.venv\Scripts\python.exe -m unittest tests.test_live_policy` — `Ran 8 tests in 0.015s` — `OK`.
+- Percent change is the selected policy minus the compared side, divided by that side. A smaller selected policy is negative.
+- Fee dollars stay inside auto-refund dollars. The comparison does not show a separate fee metric. Under the auto-refund dollar change it states how much of that change is the $25 fee.
+- The picker does not show average response time. Rows already marked auto have no recorded human wait, so that average is not the time a policy would have saved.
+- When comparing, the net request and dollar changes are also split into newly auto-approved, no longer auto-approved, and still auto-approved. Still is on both sides and is not part of the net. Dollars include the $25 fee.
+- Policy Builder no longer shows the draft caption, the model name, or the current-session draft JSON. The chat opens with a fixed assistant message: be clear, suggestions use the history data, and choosing a live policy happens on Policy Picker. That message is not sent to the model.
+
 ### Remaining limitations — two-tab UI slice
 
 - Task overall stays `in-progress`. This slice does not finish the manager mechanism or the reviewer queue.

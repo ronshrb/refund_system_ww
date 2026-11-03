@@ -8,14 +8,21 @@ its own, rewrite source CSVs, or let a model write the pointer.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
 from pathlib import Path
 
+from utils.data.data_processing import parse_amount
 from utils.policy.policy_evaluator import evaluate
 from utils.policy.policy_preview import PolicyInputError, parse_policy_file
+
+# Handling cost the manager asked to add to every auto refund. Not a field in the CSVs.
+AUTO_REFUND_FEE = Decimal("25")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 POLICIES_DIR = PROJECT_ROOT / "policies"
@@ -172,6 +179,78 @@ def explain_rule(rule) -> str:
     return text[0].upper() + text[1:] + "."
 
 
+def history_outcome_rates(policy, request_rows) -> dict[str, int | float | Decimal | None]:
+    """Score one policy against every history row, duplicates skipped.
+
+    ``policy`` None is the history baseline: a row counts as auto-approved
+    when ``decided_by`` is auto. That mark describes the file. It is not an
+    eligibility label. A policy file is scored with ``evaluate`` instead.
+    ``average_response_days`` is the mean of ``decided_at`` minus
+    ``requested_at``. Under a policy file, a row that policy would
+    auto-approve counts as answered when the request arrived. Under the
+    history baseline, the recorded gap is kept, including rows already
+    marked auto. ``auto_refund_dollars`` is the request amount plus
+    ``AUTO_REFUND_FEE`` for each auto-approved row whose amount parses.
+    ``fee_dollars`` is only that fee, for the same rows.
+    """
+    use_history_auto = not isinstance(policy, Mapping)
+    cohort_policy = policy if isinstance(policy, Mapping) else {"allow": []}
+    considered = 0
+    auto_approved = 0
+    timed = 0
+    response_sum = 0.0
+    dollars = Decimal("0")
+    fees = Decimal("0")
+    for row, projected in _intake_rows(cohort_policy, request_rows):
+        considered += 1
+        if use_history_auto:
+            would_auto = _was_auto(row)
+        else:
+            would_auto = (
+                evaluate(projected, policy, already_paid_ids=set())["decision"] == "approve_full"
+            )
+        waited = _response_days(row)
+        if waited is not None:
+            timed += 1
+            # A new auto-approve answers at request time. History keeps its recorded gap.
+            response_sum += waited if use_history_auto or not would_auto else 0.0
+        if not would_auto:
+            continue
+        auto_approved += 1
+        amount = parse_amount(projected.get("amount_usd"))
+        if amount is not None:
+            dollars += amount + AUTO_REFUND_FEE
+            fees += AUTO_REFUND_FEE
+    return {
+        "considered": considered,
+        "auto_approved": auto_approved,
+        "percent_auto_approved": _share(auto_approved, considered),
+        "average_response_days": (response_sum / timed) if timed else None,
+        "auto_refund_dollars": dollars,
+        "fee_dollars": fees,
+    }
+
+
+def historical_auto_approvals(request_rows) -> list[dict[str, str]]:
+    """History rows whose ``decided_by`` is auto. Does not apply a policy."""
+    matches = []
+    for row, projected in _intake_rows({"allow": []}, request_rows):
+        if not _was_auto(row):
+            continue
+        request_id = row.get("request_id")
+        amount = projected.get("amount_usd")
+        waited = _response_days(row)
+        decided_by = row.get("decided_by")
+        matches.append({
+            "request_id": request_id.strip() if isinstance(request_id, str) else "",
+            "amount_usd": "" if amount is None else str(amount),
+            "why": "Recorded as auto in the history file.",
+            "past_decided_by": decided_by.strip() if isinstance(decided_by, str) else "",
+            "response_days": "" if waited is None else f"{waited:.2f}",
+        })
+    return matches
+
+
 def preview_auto_approvals(policy, request_rows) -> list[dict[str, str]]:
     """Return history rows this policy would auto-approve, with a plain why.
 
@@ -179,6 +258,100 @@ def preview_auto_approvals(policy, request_rows) -> list[dict[str, str]]:
     post-decision columns, skips every copy of a duplicated request id, and
     calls ``evaluate`` with ``already_paid_ids=set()``. Historical ``decision``
     values are not eligibility labels. One explanation is reused per rule id.
+    """
+    rules_by_id = {}
+    allow = policy.get("allow") if isinstance(policy, Mapping) else None
+    if isinstance(allow, list):
+        for rule in allow:
+            if isinstance(rule, Mapping) and isinstance(rule.get("id"), str):
+                rules_by_id[rule["id"]] = rule
+    explanations: dict[str, str] = {}
+    matches = []
+    for row, projected in _intake_rows(policy, request_rows):
+        result = evaluate(projected, policy, already_paid_ids=set())
+        if result["decision"] != "approve_full":
+            continue
+        request_id = row.get("request_id")
+        rule_id = result.get("matched_rule")
+        if not isinstance(rule_id, str):
+            why = "an extra condition"
+        elif rule_id not in explanations:
+            rule = rules_by_id.get(rule_id)
+            explanations[rule_id] = explain_rule(rule) if rule is not None else "an extra condition"
+            why = explanations[rule_id]
+        else:
+            why = explanations[rule_id]
+        amount = projected.get("amount_usd")
+        waited = None if _was_auto(row) else _response_days(row)
+        matches.append({
+            "request_id": request_id.strip() if isinstance(request_id, str) else "",
+            "amount_usd": "" if amount is None else str(amount),
+            "why": why,
+            "past_decided_by": (row.get("decided_by") or "").strip(),
+            "response_days": "" if waited is None else f"{waited:.2f}",
+        })
+    return matches
+
+
+def auto_approval_split(selected_matches, other_matches) -> dict[str, int | Decimal]:
+    """Split auto-approvals into still, new, and no longer, versus the other side.
+
+    ``new`` rows are auto-approved on the selected side only. ``dropped`` rows
+    are auto-approved on the compared side only. ``still`` rows are on both.
+    Dollars are the request amount plus ``AUTO_REFUND_FEE`` when the amount
+    parses. The net change is new minus dropped. ``still`` is not part of it.
+    Rows with no request id are left out.
+    """
+    selected = _matches_by_id(selected_matches)
+    other = _matches_by_id(other_matches)
+    still_ids = set(selected) & set(other)
+    new_ids = set(selected) - set(other)
+    dropped_ids = set(other) - set(selected)
+    return {
+        "still_count": len(still_ids),
+        "still_dollars": _match_dollars(still_ids, selected),
+        "new_count": len(new_ids),
+        "new_dollars": _match_dollars(new_ids, selected),
+        "dropped_count": len(dropped_ids),
+        "dropped_dollars": _match_dollars(dropped_ids, other),
+    }
+
+
+def _matches_by_id(matches) -> dict[str, dict]:
+    by_id = {}
+    for row in matches:
+        request_id = row.get("request_id")
+        if isinstance(request_id, str) and request_id.strip():
+            by_id[request_id.strip()] = row
+    return by_id
+
+
+def _match_dollars(request_ids, matches_by_id) -> Decimal:
+    dollars = Decimal("0")
+    for request_id in request_ids:
+        amount = parse_amount(matches_by_id[request_id].get("amount_usd"))
+        if amount is None:
+            continue
+        dollars += amount + AUTO_REFUND_FEE
+    return dollars
+
+
+def approvals_csv(matches) -> str:
+    """CSV of auto-approved preview rows. Does not write a file."""
+    buffer = io.StringIO()
+    fields = ["request_id", "amount_usd", "why", "past_decided_by", "response_days"]
+    writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in matches:
+        writer.writerow({field: row.get(field, "") for field in fields})
+    return buffer.getvalue()
+
+
+def _intake_rows(policy, request_rows) -> list[tuple[Mapping, dict]]:
+    """Return ``(original, intake projection)`` pairs, skipping duplicate ids.
+
+    An unusable policy yields no rows. Post-decision columns stay on the
+    original and are removed from the projection passed to ``evaluate``.
     """
     if not isinstance(policy, Mapping):
         return []
@@ -196,14 +369,7 @@ def preview_auto_approvals(policy, request_rows) -> list[dict[str, str]]:
             normalized_id = request_id.strip()
             id_counts[normalized_id] = id_counts.get(normalized_id, 0) + 1
 
-    rules_by_id = {}
-    allow = policy.get("allow")
-    if isinstance(allow, list):
-        for rule in allow:
-            if isinstance(rule, Mapping) and isinstance(rule.get("id"), str):
-                rules_by_id[rule["id"]] = rule
-    explanations: dict[str, str] = {}
-    matches = []
+    kept = []
     for row in rows:
         request_id = row.get("request_id")
         if isinstance(request_id, str) and id_counts.get(request_id.strip(), 0) > 1:
@@ -213,25 +379,59 @@ def preview_auto_approvals(policy, request_rows) -> list[dict[str, str]]:
             for key, value in row.items()
             if key not in _POST_DECISION_FIELDS
         }
-        result = evaluate(projected, policy, already_paid_ids=set())
-        if result["decision"] != "approve_full":
-            continue
-        rule_id = result.get("matched_rule")
-        if not isinstance(rule_id, str):
-            why = "an extra condition"
-        elif rule_id not in explanations:
-            rule = rules_by_id.get(rule_id)
-            explanations[rule_id] = explain_rule(rule) if rule is not None else "an extra condition"
-            why = explanations[rule_id]
-        else:
-            why = explanations[rule_id]
-        amount = projected.get("amount_usd")
-        matches.append({
-            "request_id": request_id.strip() if isinstance(request_id, str) else "",
-            "amount_usd": "" if amount is None else str(amount),
-            "why": why,
-        })
-    return matches
+        kept.append((row, projected))
+    return kept
+
+
+def _was_auto(row: Mapping) -> bool:
+    value = row.get("decided_by")
+    return isinstance(value, str) and value.strip().casefold() == "auto"
+
+
+def _parse_moment(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+    return moment
+
+
+def _response_days(row: Mapping) -> float | None:
+    """Days from request to the recorded decision, or None when unknown.
+
+    A date-only request has no clock time, so only whole calendar days count.
+    A negative gap is ignored.
+    """
+    raw_requested = row.get("requested_at")
+    requested = _parse_moment(raw_requested)
+    decided = _parse_moment(row.get("decided_at"))
+    if requested is None or decided is None:
+        return None
+    date_only = (
+        isinstance(raw_requested, str)
+        and "T" not in raw_requested
+        and " " not in raw_requested.strip()
+    )
+    if date_only:
+        days = (decided.date() - requested.date()).days
+        if days < 0:
+            return None
+        return float(days)
+    delta = (decided - requested).total_seconds() / 86400
+    if delta < 0:
+        return None
+    return delta
+
+
+def _share(count: int, cohort: int) -> float | None:
+    if cohort == 0:
+        return None
+    return (100.0 * count) / cohort
 
 
 def _policies_directory(policies_dir: Path | None) -> Path:
