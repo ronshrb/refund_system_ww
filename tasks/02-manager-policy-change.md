@@ -5,6 +5,34 @@ Status: in-progress
 Dependencies: task 01 closed policy schema and `validate_policy`; existing `utils.policy_preview` API; `data/raw/policy_notes.csv` and `data/raw/data_dictionary.csv` as policy/field context; the local pending-row source for previews; Streamlit conversation/session state and function-tool registration. A model provider call is permitted only when a provider/runtime is configured and data-sharing is approved.
 Business outcome: Let a Refund Operations Manager describe a policy change over conversation turns, resolve vague concepts into schema-supported values, then build, validate, and preview a draft through a deterministic Python function tool. This slice does not approve refunds or activate/version policy.
 
+## Approved slice: light CoT, data dictionary text, history query tool — 2026-11-03
+
+Owner: project-engineer  
+Status: **done for this agent-context slice**; task overall remains `in-progress` (activation/versioning and Reviews queue still open)
+
+Scope additions to the Policy Management agent:
+
+1. **Light chain of thought** — system instructions ask for a short 3–6 bullet scratch pad before clarifying questions or tool calls (no separate think tool / reasoning model).
+2. **Data dictionary in system prompt** — field meanings pasted as static text in `policy_agent.DATA_DICTIONARY_TEXT` / `build_system_message` (not a CSV tool).
+3. **`query_history` tool** — local filter/aggregate/sample over synthetic `data/raw/history.csv` so the agent can inspect how draft rules would have matched the sample and ask edge-case questions. Historical `decision` / `decided_by` values are **descriptive only**, not ground-truth labels. Demo authorization: assignment uses fake sample data; tool results (including small sample rows without customer/support note text) may be returned to the model. Still no refund approval or policy activation.
+
+Acceptance checks:
+
+- [x] System instructions include a short CoT requirement before questions/tools.
+- [x] System message always includes data-dictionary text (not loaded live from CSV at tool time).
+- [x] Registered tools are `build_policy` and `query_history`.
+- [x] `query_history` returns match counts / breakdowns / capped sample rows; omits `customer_note` and `support_note` from samples; includes a non-ground-truth disclaimer.
+- [x] Session draft still updates only when `build_policy` returns `status == "proposed"`.
+- [x] Focused offline tests updated (`tests.test_policy_agent`).
+
+Evidence command (from repo root):
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_policy_agent
+```
+
+Observed 2026-11-03: `Ran 9 tests ... OK`.
+
 ## Completed slice: Streamlit UI shell (Part 2 reviewer + manager shell only) — 2026-11-02
 
 Owner: project-engineer  

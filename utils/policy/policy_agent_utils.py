@@ -1,23 +1,29 @@
 """Helpers for the manager policy-drafting agent host.
 
-No refund approvals, policy activation, or customer request rows/notes are
-sent to a provider from these helpers.
+Does not approve refunds or activate policy. History query results are for the
+assignment demo (synthetic sample data); treat historical decisions as
+descriptive only, not ground-truth labels.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from copy import deepcopy
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Sequence
 
 from dotenv import load_dotenv
 
+from utils.data.data_processing import parse_amount
+from utils.data.dataloader import load_rows
 from utils.policy.policy_draft_tool import build_policy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_PATH = PROJECT_ROOT / "policy" / "policy.template.json"
+HISTORY_PATH = PROJECT_ROOT / "data" / "raw" / "history.csv"
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -29,6 +35,20 @@ OFFLINE_MESSAGE = (
 )
 
 BUILD_POLICY_TOOL_NAME = "build_policy"
+QUERY_HISTORY_TOOL_NAME = "query_history"
+_CENT = Decimal("0.01")
+_HISTORY_SAMPLE_FIELDS = (
+    "request_id",
+    "amount_usd",
+    "stated_reason",
+    "tenure_months",
+    "days_since_delivery",
+    "fraud_flag",
+    "category",
+    "payment_method",
+    "decision",
+    "decided_by",
+)
 
 
 def load_template_draft() -> dict[str, Any]:
@@ -80,9 +100,73 @@ def build_policy_tool_schema() -> dict[str, Any]:
     }
 
 
+def query_history_tool_schema() -> dict[str, Any]:
+    """Return the OpenAI tools-API shape for local ``query_history``."""
+    return {
+        "type": "function",
+        "function": {
+            "name": QUERY_HISTORY_TOOL_NAME,
+            "description": (
+                "Query the local synthetic history.csv sample with optional "
+                "filters. Returns match counts, simple breakdowns, and a small "
+                "sample of rows to help ask clarifying or edge-case questions. "
+                "Historical decisions are descriptive only, not ground-truth "
+                "labels. Does not approve refunds or activate policy."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "stated_reason": {
+                        "type": "string",
+                        "description": "Exact stated_reason to match, if any.",
+                    },
+                    "amount_usd_lte": {
+                        "type": "number",
+                        "description": "Keep rows with amount_usd <= this value.",
+                    },
+                    "amount_usd_gt": {
+                        "type": "number",
+                        "description": "Keep rows with amount_usd > this value.",
+                    },
+                    "tenure_months_gte": {
+                        "type": "integer",
+                        "description": "Keep rows with tenure_months >= this value.",
+                    },
+                    "days_since_delivery_lte": {
+                        "type": "integer",
+                        "description": (
+                            "Keep rows with days_since_delivery <= this value."
+                        ),
+                    },
+                    "days_since_delivery_gte": {
+                        "type": "integer",
+                        "description": (
+                            "Keep rows with days_since_delivery >= this value."
+                        ),
+                    },
+                    "fraud_flag": {
+                        "type": "string",
+                        "description": "Exact fraud_flag to match (e.g. 'no').",
+                    },
+                    "sample_limit": {
+                        "type": "integer",
+                        "description": "Max sample rows to return (1-20, default 5).",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def registered_tool_schemas() -> list[dict[str, Any]]:
+    """Return all OpenAI tool schemas registered for the manager agent."""
+    return [build_policy_tool_schema(), query_history_tool_schema()]
+
+
 def registered_tool_names() -> tuple[str, ...]:
-    """Return the only tool name registered for the manager agent."""
-    return (BUILD_POLICY_TOOL_NAME,)
+    """Return tool names registered for the manager agent."""
+    return (BUILD_POLICY_TOOL_NAME, QUERY_HISTORY_TOOL_NAME)
 
 
 def apply_build_policy_result(
@@ -110,27 +194,36 @@ def _as_str_tuple(value: Any) -> tuple[str, ...]:
     return ()
 
 
-def execute_build_policy_arguments(
+def _parse_tool_arguments(
     arguments: Mapping[str, Any] | str,
-    current_draft: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Invoke local ``build_policy``, always injecting the session current draft."""
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return ``(parsed, None)`` or ``(None, error_payload)``."""
     if isinstance(arguments, str):
         try:
             parsed = json.loads(arguments)
         except json.JSONDecodeError:
-            return {
+            return None, {
                 "status": "invalid",
                 "errors": ["Tool arguments must be valid JSON."],
             }
     else:
         parsed = dict(arguments)
-
     if not isinstance(parsed, dict):
-        return {
+        return None, {
             "status": "invalid",
             "errors": ["Tool arguments must be a JSON object."],
         }
+    return parsed, None
+
+
+def execute_build_policy_arguments(
+    arguments: Mapping[str, Any] | str,
+    current_draft: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Invoke local ``build_policy``, always injecting the session current draft."""
+    parsed, error = _parse_tool_arguments(arguments)
+    if error is not None:
+        return error
 
     return build_policy(
         parsed.get("candidate_policy"),
@@ -138,6 +231,137 @@ def execute_build_policy_arguments(
         assumptions=_as_str_tuple(parsed.get("assumptions")),
         cannot_express=_as_str_tuple(parsed.get("cannot_express")),
     )
+
+
+def _parse_int_field(row: Mapping[str, str], field: str) -> int | None:
+    raw = (row.get(field) or "").strip()
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_matches_history_filters(row: Mapping[str, str], filters: Mapping[str, Any]) -> bool:
+    """Return whether a history row matches optional query filters."""
+    stated_reason = filters.get("stated_reason")
+    if stated_reason is not None and (row.get("stated_reason") or "") != str(stated_reason):
+        return False
+
+    fraud_flag = filters.get("fraud_flag")
+    if fraud_flag is not None and (row.get("fraud_flag") or "") != str(fraud_flag):
+        return False
+
+    amount = parse_amount(row.get("amount_usd"))
+    if filters.get("amount_usd_lte") is not None:
+        if amount is None or amount > Decimal(str(filters["amount_usd_lte"])):
+            return False
+    if filters.get("amount_usd_gt") is not None:
+        if amount is None or amount <= Decimal(str(filters["amount_usd_gt"])):
+            return False
+
+    if filters.get("tenure_months_gte") is not None:
+        value = _parse_int_field(row, "tenure_months")
+        try:
+            bound = int(filters["tenure_months_gte"])
+        except (TypeError, ValueError):
+            return False
+        if value is None or value < bound:
+            return False
+
+    if filters.get("days_since_delivery_lte") is not None:
+        value = _parse_int_field(row, "days_since_delivery")
+        try:
+            bound = int(filters["days_since_delivery_lte"])
+        except (TypeError, ValueError):
+            return False
+        if value is None or value > bound:
+            return False
+
+    if filters.get("days_since_delivery_gte") is not None:
+        value = _parse_int_field(row, "days_since_delivery")
+        try:
+            bound = int(filters["days_since_delivery_gte"])
+        except (TypeError, ValueError):
+            return False
+        if value is None or value < bound:
+            return False
+
+    return True
+
+
+def query_history(filters: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Filter local history.csv and return counts, breakdowns, and a small sample.
+
+    Historical ``decision`` / ``decided_by`` values are descriptive sample
+    evidence only — not labels that prove a rule is correct or safe.
+    """
+    filters = dict(filters or {})
+    try:
+        sample_limit = int(filters.pop("sample_limit", 5) or 5)
+    except (TypeError, ValueError):
+        return {"status": "invalid", "errors": ["sample_limit must be an integer."]}
+    sample_limit = max(1, min(sample_limit, 20))
+
+    try:
+        rows = load_rows(HISTORY_PATH)
+    except OSError:
+        return {"status": "error", "errors": ["Could not read history.csv."]}
+
+    matched = [row for row in rows if _row_matches_history_filters(row, filters)]
+    total = Decimal("0.00")
+    reason_counts: Counter[str] = Counter()
+    decision_counts: Counter[str] = Counter()
+    for row in matched:
+        amount = parse_amount(row.get("amount_usd"))
+        if amount is not None:
+            total += amount
+        reason_counts[(row.get("stated_reason") or "").strip() or "(blank)"] += 1
+        decision_counts[(row.get("decision") or "").strip() or "(blank)"] += 1
+
+    sample = [
+        {field: row.get(field, "") for field in _HISTORY_SAMPLE_FIELDS}
+        for row in matched[:sample_limit]
+    ]
+    return {
+        "status": "ok",
+        "disclaimer": (
+            "Synthetic assignment sample. Historical decisions are not "
+            "ground-truth labels and do not authorize policy activation."
+        ),
+        "filters_applied": filters,
+        "match_count": len(matched),
+        "cohort_size": len(rows),
+        "matched_amount_total_usd": format(total.quantize(_CENT), "f"),
+        "by_stated_reason": dict(reason_counts),
+        "by_decision": dict(decision_counts),
+        "sample_rows": sample,
+    }
+
+
+def execute_query_history_arguments(
+    arguments: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Parse tool arguments and run ``query_history``."""
+    parsed, error = _parse_tool_arguments(arguments)
+    if error is not None:
+        return error
+    return query_history(parsed)
+
+
+def execute_registered_tool(
+    name: str,
+    arguments: Mapping[str, Any] | str,
+    current_draft: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Dispatch a registered tool name to the local host implementation."""
+    if name == BUILD_POLICY_TOOL_NAME:
+        return execute_build_policy_arguments(arguments, current_draft)
+    if name == QUERY_HISTORY_TOOL_NAME:
+        return execute_query_history_arguments(arguments)
+    return {
+        "status": "invalid",
+        "errors": [f"Unsupported tool '{name}'."],
+    }
 
 
 def format_preview_summary_for_manager(
@@ -161,7 +385,22 @@ def format_preview_summary_for_manager(
 
 
 def tool_result_for_model(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep only status, draft, assumptions, aggregates, and errors for the model."""
+    """Filter tool payloads before they are sent back to the model."""
+    if result.get("status") == "ok" and "sample_rows" in result:
+        # query_history payload — assignment demo may include sample history rows.
+        allowed = (
+            "status",
+            "disclaimer",
+            "filters_applied",
+            "match_count",
+            "cohort_size",
+            "matched_amount_total_usd",
+            "by_stated_reason",
+            "by_decision",
+            "sample_rows",
+            "errors",
+        )
+        return {key: result[key] for key in allowed if key in result}
     allowed = (
         "status",
         "draft",

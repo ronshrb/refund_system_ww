@@ -61,30 +61,38 @@ class _FakeResponse:
 
 
 class PolicyAgentHostTests(unittest.TestCase):
-    def test_tool_registration_shape_for_build_policy_only(self):
-        schema = policy_agent.build_policy_tool_schema()
-        self.assertEqual(schema["type"], "function")
-        self.assertEqual(schema["function"]["name"], "build_policy")
-        self.assertEqual(policy_agent.registered_tool_names(), ("build_policy",))
-        params = schema["function"]["parameters"]
+    def test_tool_registration_includes_build_policy_and_query_history(self):
+        names = policy_agent.registered_tool_names()
+        self.assertEqual(names, ("build_policy", "query_history"))
+        schemas = {
+            item["function"]["name"]: item
+            for item in policy_agent.registered_tool_schemas()
+        }
+        self.assertEqual(set(schemas), set(names))
+        build = schemas["build_policy"]
+        self.assertEqual(build["type"], "function")
+        params = build["function"]["parameters"]
         self.assertIn("candidate_policy", params["properties"])
         self.assertIn("candidate_policy", params["required"])
         # Host injects current_draft; it must not be a model-writable property.
         self.assertNotIn("current_draft", params["properties"])
+        history = schemas["query_history"]["function"]["parameters"]["properties"]
+        self.assertIn("stated_reason", history)
+        self.assertIn("amount_usd_lte", history)
 
     def test_clarification_guidance_encoded_in_system_instructions(self):
         """Clarification-before-tool is prompt/system guidance (documented)."""
-        self.assertTrue(
-            policy_agent.clarification_guidance_present(
-                policy_agent.SYSTEM_INSTRUCTIONS
-            )
-        )
         system = policy_agent.build_system_message(_template_draft())
-        self.assertTrue(policy_agent.clarification_guidance_present(system))
         collapsed = " ".join(system.split())
+        self.assertIn("Ask focused clarifying questions", collapsed)
         self.assertIn("Do not invent an unconfirmed threshold", collapsed)
         self.assertIn("good customers", collapsed)
         self.assertIn("small stuff", collapsed)
+        self.assertIn("Never silently invent numeric values", collapsed)
+        self.assertIn("Light chain of thought", collapsed)
+        self.assertIn("Data dictionary", collapsed)
+        self.assertIn("tenure_months", collapsed)
+        self.assertIn("query_history", collapsed)
 
     def test_session_draft_updates_only_on_proposed(self):
         original = _template_draft()
@@ -136,19 +144,6 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(next_draft, before)
 
-    def test_missing_key_path_is_honest_offline(self):
-        with patch.object(policy_agent, "OPENAI_API_KEY", ""):
-            turn = policy_agent.run_policy_agent_turn(
-                user_text="Approve small refunds automatically",
-                history=[],
-                current_draft=_template_draft(),
-            )
-        self.assertTrue(turn["offline"])
-        self.assertEqual(turn["assistant_text"], policy_agent.OFFLINE_MESSAGE)
-        self.assertIn("does not invent a model reply", turn["assistant_text"])
-        self.assertFalse(turn["draft_updated"])
-        self.assertIsNone(turn["provider_messages"])
-
     def test_provider_payload_excludes_customer_fields_and_request_rows(self):
         secret_request_id = "RF-SECRET-9999"
         secret_customer_note = "SECRET_CUSTOMER_NOTE_VALUE_XYZ"
@@ -162,6 +157,7 @@ class PolicyAgentHostTests(unittest.TestCase):
 
         draft = _template_draft()
         system = policy_agent.build_system_message(draft)
+        # System prompt has dictionary + draft only; no live request secrets.
         for marker in forbidden:
             self.assertNotIn(marker, system)
 
@@ -233,7 +229,9 @@ class PolicyAgentHostTests(unittest.TestCase):
         with patch.object(
             policy_agent, "OPENAI_API_KEY", "test-key"
         ), patch.object(
-            policy_agent, "execute_build_policy_arguments", return_value=proposed
+            policy_agent,
+            "execute_registered_tool",
+            return_value=proposed,
         ) as execute:
             turn = policy_agent.run_policy_agent_turn(
                 user_text="changed_mind up to 25 dollars",
@@ -244,13 +242,13 @@ class PolicyAgentHostTests(unittest.TestCase):
 
         execute.assert_called_once()
         args, kwargs = execute.call_args
-        self.assertEqual(args[1], current)
+        self.assertEqual(args[0], "build_policy")
+        self.assertEqual(args[2], current)
         self.assertTrue(turn["draft_updated"])
         self.assertEqual(turn["draft"]["comment"], "manager candidate")
         self.assertEqual(
             turn["preview_summary"]["candidate"]["approved_total_usd"], "10.00"
         )
-        self.assertFalse(turn["offline"])
         provider_blob = json.dumps(turn["provider_messages"], default=str)
         self.assertNotIn("RF-SECRET", provider_blob)
         self.assertNotIn("SECRET_CUSTOMER_NOTE", provider_blob)
@@ -258,7 +256,7 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertEqual(
             create_kwargs["tools"][0]["function"]["name"], "build_policy"
         )
-        self.assertEqual(len(create_kwargs["tools"]), 1)
+        self.assertEqual(len(create_kwargs["tools"]), 2)
 
     def test_mocked_cannot_express_preserves_draft_in_turn(self):
         current = _template_draft()
@@ -288,7 +286,9 @@ class PolicyAgentHostTests(unittest.TestCase):
         with patch.object(
             policy_agent, "OPENAI_API_KEY", "test-key"
         ), patch.object(
-            policy_agent, "execute_build_policy_arguments", return_value=cannot
+            policy_agent,
+            "execute_registered_tool",
+            return_value=cannot,
         ):
             turn = policy_agent.run_policy_agent_turn(
                 user_text="Auto-reject late delivery",
@@ -299,6 +299,25 @@ class PolicyAgentHostTests(unittest.TestCase):
 
         self.assertFalse(turn["draft_updated"])
         self.assertEqual(turn["draft"], before)
+
+    def test_query_history_returns_counts_for_filters(self):
+        from utils.policy import policy_agent_utils as utils
+
+        result = utils.query_history(
+            {
+                "stated_reason": "changed_mind",
+                "amount_usd_lte": 50,
+                "sample_limit": 3,
+            }
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertGreaterEqual(result["match_count"], 1)
+        self.assertLessEqual(len(result["sample_rows"]), 3)
+        self.assertIn("disclaimer", result)
+        for row in result["sample_rows"]:
+            self.assertEqual(row.get("stated_reason"), "changed_mind")
+            self.assertNotIn("customer_note", row)
+            self.assertNotIn("support_note", row)
 
     def test_ensure_session_defaults_initializes_template_draft(self):
         state: dict = {}

@@ -1,7 +1,7 @@
-"""Manager policy-drafting agent: one OpenAI turn with local ``build_policy``.
+"""Manager policy-drafting agent: one OpenAI turn with local tools.
 
-Never approves refunds, activates policy, or sends customer request rows/notes
-to a provider.
+Never approves refunds or activates policy. History query is for the assignment
+demo on synthetic sample data; historical decisions are not ground-truth labels.
 """
 
 from __future__ import annotations
@@ -10,24 +10,49 @@ import json
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
-from utils.policy import policy_agent_utils as utils
-
-# Re-export helpers the Streamlit page and tests import from this module.
-OPENAI_API_KEY = utils.OPENAI_API_KEY
-OFFLINE_MESSAGE = utils.OFFLINE_MESSAGE
-BUILD_POLICY_TOOL_NAME = utils.BUILD_POLICY_TOOL_NAME
-load_template_draft = utils.load_template_draft
-build_policy_tool_schema = utils.build_policy_tool_schema
-registered_tool_names = utils.registered_tool_names
-apply_build_policy_result = utils.apply_build_policy_result
-execute_build_policy_arguments = utils.execute_build_policy_arguments
-format_preview_summary_for_manager = utils.format_preview_summary_for_manager
-conversation_messages_for_provider = utils.conversation_messages_for_provider
-provider_payload_contains_forbidden_customer_data = (
-    utils.provider_payload_contains_forbidden_customer_data
+from utils.policy.policy_agent_utils import (
+    BUILD_POLICY_TOOL_NAME,
+    OFFLINE_MESSAGE,
+    OPENAI_API_KEY,
+    QUERY_HISTORY_TOOL_NAME,
+    apply_build_policy_result,
+    assert_messages_safe_for_provider,
+    assistant_text_from_tool_results,
+    build_policy_tool_schema,
+    conversation_messages_for_provider,
+    ensure_session_defaults,
+    execute_build_policy_arguments,
+    execute_registered_tool,
+    format_preview_summary_for_manager,
+    load_template_draft,
+    provider_payload_contains_forbidden_customer_data,
+    query_history_tool_schema,
+    registered_tool_names,
+    registered_tool_schemas,
+    tool_result_for_model,
 )
-assert_messages_safe_for_provider = utils.assert_messages_safe_for_provider
-ensure_session_defaults = utils.ensure_session_defaults
+
+DATA_DICTIONARY_TEXT = """
+request_id: Unique ID per refund request. RF-1xxx = web form, RF-2xxx = support desk.
+requested_at: Date the customer submitted the request (YYYY-MM-DD).
+customer_id: Customer account ID.
+tenure_months: Months since the customer's account was created.
+prior_refunds_12m: Number of refunds granted to this customer in the 12 months before this request.
+amount_usd: Requested refund amount in US dollars (number).
+category: Product category: apparel, home, electronics.
+payment_method: card or paypal.
+stated_reason: Reason the customer selected: wrong_size, changed_mind, arrived_damaged, wrong_item, never_arrived, late_delivery.
+customer_note: Free text written by the customer. Optional.
+support_note: Free text written by the support agent who handled the ticket. Optional.
+days_since_delivery: Days between delivery (per carrier) and the request.
+fraud_flag: yes / no. Set by the payment provider's risk check.
+decision: approved, rejected, partial, or pending. (Post-decision; not an intake policy condition.)
+decided_by: 'auto' for the existing auto-approve rule, otherwise the reviewer's name. (Post-decision.)
+outcome_note: Anything that happened after the decision. (Post-decision.)
+decided_at: When the decision was recorded. (Post-decision.)
+review_minutes: Minutes the reviewer spent (blank for auto). (Post-decision.)
+Note: Column descriptions describe intended contents; the sample data does not always comply.
+""".strip()
 
 SYSTEM_INSTRUCTIONS = """You are the Policy Drafter for a Refund Operations Manager.
 
@@ -51,9 +76,20 @@ nonempty when object. Supported when conditions only:
 - request_id_not_already_paid: true
 Do not invent fields, operators, rails, reject actions, or partial refunds.
 
-Clarification before tools:
-- Ask focused clarifying questions before any tool call when intent, fields,
-  operators, or numeric thresholds are ambiguous.
+Light chain of thought (keep short):
+- Before asking a clarifying question or calling a tool, think briefly in 3-6
+  short bullets: manager intent, open ambiguities, data limitations, candidate conditions, and
+  edge cases worth checking.
+- Put that scratch reasoning in the assistant reply when helpful, then ask
+  questions or call tools. Do not write long essays.
+
+Clarification before build_policy:
+- Ask focused clarifying questions when intent, fields, operators, or numeric
+  thresholds are ambiguous.
+- Ask in business terms when intent or numeric thresholds are ambiguous.
+  The manager may not know schema field names; do not ask them to pick
+  columns or operators. Propose a plain-language mapping to a supported
+  condition and confirm it.
 - For vague phrases such as "good customers" or "small stuff", ask what the
   manager means and guide them toward supported fields and concrete values
   (for example tenure_months_gte or an amount_usd range). Do not invent an
@@ -63,48 +99,35 @@ Clarification before tools:
   unverified, and ask the manager to confirm or correct it before submitting a
   candidate that uses it.
 
-Function tool:
-- After policy-affecting answers are clear, call only `build_policy`.
-- Pass a complete candidate_policy based on the current session draft supplied
-  in this prompt. Optionally pass assumptions and cannot_express string lists.
-- The host injects current_draft from session state; do not invent a different
-  current draft.
-- For a clearly stated but unsupported requirement, put a concise explanation
-  in cannot_express instead of approximating or omitting it.
-- Do not call the tool while required answers remain unclear.
-
-Data boundary:
-- Never ask for or send history/pending request rows, request IDs, customer
-  fields, or the free-text contents of customer_note / support_note.
-- Continue with manager text, the schema, and the current draft only.
+Tools:
+- `query_history`: optional filters against the local synthetic history sample.
+  Use it to see how many past requests match a draft rule sketch, spot edge
+  cases, and ask better clarifying questions. Historical decisions are
+  descriptive only — not proof that a rule is correct or safe.
+- `build_policy`: after policy-affecting answers are clear, pass a complete
+  candidate_policy based on the current session draft. Optionally pass
+  assumptions and cannot_express. The host injects current_draft. For a clearly
+  stated but unsupported requirement, put an explanation in cannot_express.
+  Do not call build_policy while required answers remain unclear.
+- If build_policy returns invalid/error, explain the errors and either ask the
+  manager or call build_policy again with a corrected candidate.
 
 After a tool result:
 - status "proposed" means the local host may adopt the returned draft; summarize
   aggregate preview counts/totals/deltas only.
 - status "invalid", "error", or "cannot_express" leaves the session draft
   unchanged; explain clearly.
-- Never relay individual preview rows or treat a proposal as activation.
+- Never treat a proposal or history match as activation or a refund.
 """
 
 
-def clarification_guidance_present(system_text: str) -> bool:
-    """Return whether system text encodes clarification-before-tool rules."""
-    collapsed = " ".join(system_text.split())
-    required = (
-        "Ask focused clarifying questions before any tool call",
-        "good customers",
-        "small stuff",
-        "Do not invent an unconfirmed threshold",
-        "Never silently invent numeric values",
-    )
-    return all(fragment in collapsed for fragment in required)
-
-
 def build_system_message(current_draft: Mapping[str, Any]) -> str:
-    """Build the system message from instructions and the current session draft."""
+    """Build the system message: instructions, dictionary, and current draft."""
     return "\n\n".join(
         [
             SYSTEM_INSTRUCTIONS,
+            "Data dictionary (field meanings):",
+            DATA_DICTIONARY_TEXT,
             "Current session draft (JSON):",
             json.dumps(current_draft, indent=2, default=str),
         ]
@@ -120,41 +143,50 @@ def run_policy_agent_turn(
     model: str = "gpt-4o-mini",
     max_tool_rounds: int = 4,
 ) -> dict[str, Any]:
-    """Run one manager turn with optional OpenAI tool calling.
+    """Run one manager turn with OpenAI tool calling.
 
-    When no API key is configured, returns an honest offline message without
-    pretending to be the model. Session draft updates only on ``proposed``.
+    Session draft updates only on ``proposed``.
+
+    Parameters
+    ----------
+    * :
+        Everything after must be keyword-only.
+    user_text :
+        This turn's manager message (from Streamlit chat input).
+    history :
+        Prior chat turns as ``{"role", "content"}`` maps — not including the
+        current ``user_text`` (the page passes ``messages[:-1]``).
+    current_draft :
+        Session policy JSON so far (starts from ``policy.template.json``).
+    client :
+        Optional OpenAI client; ``None`` creates one with ``OPENAI_API_KEY``
+        (tests inject a mock).
+    model :
+        OpenAI model id; default ``"gpt-4o-mini"``.
+    max_tool_rounds :
+        Cap on model → tool → model loops so it cannot tool-call forever.
     """
     draft = deepcopy(dict(current_draft))
-    if not OPENAI_API_KEY:
-        return {
-            "assistant_text": OFFLINE_MESSAGE,
-            "draft": draft,
-            "draft_updated": False,
-            "preview_summary": None,
-            "tool_results": [],
-            "offline": True,
-            "provider_messages": None,
-        }
 
     if client is None:
         from openai import OpenAI
 
         client = OpenAI(api_key=OPENAI_API_KEY)
 
+    # prepare system message + history + user message
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": build_system_message(draft)},
         *conversation_messages_for_provider(history),
         {"role": "user", "content": user_text},
     ]
-    tools = [build_policy_tool_schema()]
+    tools = registered_tool_schemas()
 
     tool_results: list[dict[str, Any]] = []
     preview_summary: dict[str, Any] | None = None
     draft_updated = False
     assistant_text = ""
 
-    for _ in range(max_tool_rounds):
+    for _ in range(max_tool_rounds): # we limit the number of tool rounds to avoid infinite loops
         choice = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -186,27 +218,22 @@ def run_policy_agent_turn(
             break
 
         for call in tool_calls:
-            if call.function.name != BUILD_POLICY_TOOL_NAME:
-                result = {
-                    "status": "invalid",
-                    "errors": [f"Unsupported tool '{call.function.name}'."],
-                }
-            else:
-                result = execute_build_policy_arguments(
-                    call.function.arguments, draft
-                )
+            result = execute_registered_tool(
+                call.function.name, call.function.arguments, draft
+            )
             tool_results.append(result)
-            next_draft, changed = apply_build_policy_result(draft, result)
-            if changed:
-                draft = next_draft
-                draft_updated = True
-                preview_summary = result.get("preview_summary")
+            if call.function.name == BUILD_POLICY_TOOL_NAME:
+                next_draft, changed = apply_build_policy_result(draft, result)
+                if changed:
+                    draft = next_draft
+                    draft_updated = True
+                    preview_summary = result.get("preview_summary")
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": call.id,
                     "content": json.dumps(
-                        utils.tool_result_for_model(result), default=str
+                        tool_result_for_model(result), default=str
                     ),
                 }
             )
@@ -218,7 +245,7 @@ def run_policy_agent_turn(
         )
 
     if not assistant_text:
-        assistant_text = utils.assistant_text_from_tool_results(
+        assistant_text = assistant_text_from_tool_results(
             tool_results, preview_summary
         )
 
@@ -228,6 +255,5 @@ def run_policy_agent_turn(
         "draft_updated": draft_updated,
         "preview_summary": preview_summary,
         "tool_results": tool_results,
-        "offline": False,
         "provider_messages": messages,
     }
