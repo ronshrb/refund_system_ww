@@ -6,7 +6,7 @@ A local Streamlit app that auto-handles refund rows the live policy already matc
 
 From the repository root. Replace `your-key` with the provider key.
 
-Paste this once in PowerShell. It creates `.venv` when that interpreter is missing, installs `requirements.txt`, sets the key, runs the tests, then starts the app. Streamlit starts only if the install and the tests succeed. Open **Reviews** and upload `data/raw/pending.csv`, or another CSV with the same columns.
+Paste this once in PowerShell. It creates `.venv` when that interpreter is missing, installs `requirements.txt`, sets the key, runs the tests, then starts the app. Streamlit starts only if the install and the tests succeed. Open **Reviews** and click **Use pending.csv**, or upload `data/raw/pending.csv` or another CSV with the same columns.
 
 ```powershell
 if (-not (Test-Path .\.venv\Scripts\python.exe)) { python -m venv .venv }
@@ -32,7 +32,7 @@ Run the tests on their own:
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-Open **Reviews**. Upload pending.csv, and click Review.
+Open **Reviews**. Click **Use pending.csv** or upload a pending CSV, then click Review.
 Open **Policy Management** for the manager path: draft a policy, evaluate it based on history, then make a policy live.
 
 On macOS or Linux, from the repository root:
@@ -82,7 +82,7 @@ A repository-root `.env` (not committed) works if you leave the sidebar blank:
 
 Streamlit is the app. It has two pages, Reviews and Policy Management, and a sidebar for the provider, key, and model.
 
-The reviewer uploads a pending CSV on Reviews. `data/raw/pending.csv` is the sample file for that upload. `data/raw/history.csv` is read from disk. It is the past sample for the manager preview and for similar rows on a review.
+The reviewer loads a pending CSV on Reviews with **Use pending.csv** or an upload. `data/raw/pending.csv` is the sample that button reads. `data/raw/history.csv` is read from disk. It is the past sample for the manager preview and for similar rows on a review.
 
 `policies/` holds one JSON file per policy. `policies/live_pointer.json` names the live file. The evaluator reads that file and does not call the model. Policy Management can save a new file without moving the pointer. The picker writes the pointer after the history preview.
 

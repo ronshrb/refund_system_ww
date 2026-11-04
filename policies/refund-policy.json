@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "status": "draft",
+  "comment": "",
+  "summary": "No rule auto-approves a refund, so a person decides.",
+  "allow": []
+}

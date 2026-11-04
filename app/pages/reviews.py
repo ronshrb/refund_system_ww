@@ -4,8 +4,9 @@ Part 2 reviewer. A policy match is the only auto-approval. Every match is
 checked before it is written. The checkup can send that match back to a
 person. It cannot create an approval. Simulated decisions are not refunds.
 The upload, the review, and the decision log stay in this Streamlit session.
-Nothing on this page is written to disk. The local summary remains available
-for rows the checkup did not comment on.
+Nothing on this page is written to disk. Use pending.csv reads
+``data/raw/pending.csv`` into that same session upload and does not write it.
+The local summary remains available for rows the checkup did not comment on.
 """
 
 from __future__ import annotations
@@ -70,6 +71,7 @@ from utils.review.review_agent import (
     fill_blank_auto_notes,
 )
 _HISTORY_PATH = _REPO_ROOT / "data" / "raw" / "history.csv"
+_PENDING_SAMPLE = _REPO_ROOT / "data" / "raw" / "pending.csv"
 
 
 def _empty_selection() -> dict:
@@ -342,6 +344,7 @@ _policy = _live["policy"] if _live else None
 st.session_state["review_policy_file"] = _live["file"] if _live else None
 
 _stored = _load_stored_upload()
+_sample_error = None
 with st.container(horizontal=True, vertical_alignment="center"):
     _upload = st.file_uploader(
         "CSV",
@@ -353,15 +356,36 @@ with st.container(horizontal=True, vertical_alignment="center"):
     if _upload is not None:
         _payload = _upload.getvalue()
         _token = hashlib.sha256(_payload).hexdigest()
-        if _stored is None or _stored["token"] != _token:
+        # The widget keeps its last file across reruns. Remember that token so
+        # Use pending.csv is not replaced by it. Different bytes still replace
+        # the sample. The same bytes are not a new choice.
+        _applied = st.session_state.get("review_applied_upload_token")
+        if _applied != _token and (_stored is None or _stored["token"] != _token):
             _stored = _save_upload(_upload.name, _payload)
+            _reset_queue_selection()
+        st.session_state["review_applied_upload_token"] = _token
+    if st.button("Use pending.csv"):
+        try:
+            _sample_payload = _PENDING_SAMPLE.read_bytes()
+        except OSError:
+            _sample_error = (
+                "Could not read data/raw/pending.csv. "
+                "The file already in this session was left unchanged."
+            )
+        else:
+            _stored = _save_upload("pending.csv", _sample_payload)
             _reset_queue_selection()
     _key_ready = key_is_accepted(st.session_state)
     _review_clicked = st.button("Review", disabled=_stored is None or not _key_ready)
     if _key_ready:
-        st.markdown("Upload a pending CSV, then click Review.")
+        st.markdown("Upload a pending CSV or click Use pending.csv, then click Review.")
     else:
-        st.markdown("Apply the API key in the sidebar, then upload a file and click Review.")
+        st.markdown(
+            "Apply the API key in the sidebar, then upload a file or click Use pending.csv, and click Review."
+        )
+
+if _sample_error:
+    st.error(_sample_error)
 
 if _stored is not None:
     st.caption(f"File: {_stored['filename']}")

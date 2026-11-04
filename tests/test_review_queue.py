@@ -6,6 +6,7 @@ the developer's live pointer, and does not write ``data/raw``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -1783,6 +1784,19 @@ class SessionLogTests(unittest.TestCase):
         self.assertEqual(result["auto"], [])
         self.assertEqual(_ids(result["open"]), ["RF-1"])
         self.assertEqual(records, [])
+
+
+class PendingSampleFileTests(unittest.TestCase):
+    """Use pending.csv reads the bundled file. This test does not write it."""
+
+    def test_pending_sample_reads_as_bytes_and_the_file_hash_stays(self):
+        before = hashlib.sha256(_PENDING.read_bytes()).hexdigest()
+        payload = _PENDING.read_bytes()
+        after = hashlib.sha256(_PENDING.read_bytes()).hexdigest()
+        self.assertIsInstance(payload, bytes)
+        self.assertGreater(len(payload), 0)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), before)
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

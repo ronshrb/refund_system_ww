@@ -388,6 +388,162 @@ class PolicyConfirmationTests(unittest.TestCase):
             )
             self.assertNotIn("amount_usd_lte", [item["kind"] for item in confirmed])
 
+    def test_passed_days_and_inside_window_match_the_stated_bounds(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "returns inside the 30 days window, all reasons. "
+                    "late delivery or not arrived, 7 days passed since delivery."
+                ),
+            }
+        ]
+        draft = self._draft(
+            {
+                "stated_reason": "late_delivery",
+                "days_since_delivery_lte": 30,
+                "days_since_delivery_gte": 7,
+            }
+        )
+        draft["allow"].extend(
+            [
+                {
+                    "id": "never_arrived_window",
+                    "action": "approve_full",
+                    "all_of": [
+                        {
+                            "when": {
+                                "stated_reason": "never_arrived",
+                                "days_since_delivery_gte": 7,
+                            }
+                        }
+                    ],
+                },
+                {
+                    "id": "wrong_size_window",
+                    "action": "approve_full",
+                    "all_of": [
+                        {
+                            "when": {
+                                "stated_reason": "wrong_size",
+                                "days_since_delivery_lte": 30,
+                            }
+                        }
+                    ],
+                },
+            ]
+        )
+        self.assertEqual(policy_agent.policy_confirmation_blockers(draft, messages), [])
+        # The same digits said another way still do not confirm the other bound.
+        swapped = policy_agent.policy_confirmation_blockers(
+            self._draft(
+                {
+                    "stated_reason": "late_delivery",
+                    "days_since_delivery_lte": 7,
+                    "days_since_delivery_gte": 30,
+                }
+            ),
+            messages,
+        )
+        self.assertEqual(
+            {item["kind"] for item in swapped},
+            {"days_since_delivery_lte", "days_since_delivery_gte"},
+        )
+
+    def test_bare_yes_is_an_adoption_reply(self):
+        self.assertTrue(policy_agent.bare_adoption_reply("yes"))
+        self.assertTrue(policy_agent.bare_adoption_reply("Yes."))
+        self.assertTrue(policy_agent.bare_adoption_reply("save it please"))
+        self.assertFalse(policy_agent.bare_adoption_reply("no, it should be 30 days"))
+        self.assertFalse(policy_agent.bare_adoption_reply("yes, but make it 14 days"))
+
+    def test_yes_to_all_reasons_allows_a_rule_with_no_reason(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "returns inside the 30 days window should be approved. "
+                    "late delivery or not arrived, 7 days passed since delivery."
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "Should this apply to all reasons, or just specific ones?"
+                ),
+            },
+            {"role": "user", "content": "yes\nand made in june"},
+        ]
+        draft = self._draft({"days_since_delivery_lte": 30})
+        draft["allow"].append(
+            {
+                "id": "late_delivery_7d",
+                "action": "approve_full",
+                "all_of": [
+                    {
+                        "when": {
+                            "stated_reason": "late_delivery",
+                            "days_since_delivery_gte": 7,
+                        }
+                    }
+                ],
+            }
+        )
+        self.assertEqual(policy_agent.policy_confirmation_blockers(draft, messages), [])
+        other_yes = [
+            {"role": "assistant", "content": "Should the cap be $30?"},
+            {"role": "user", "content": "yes, within 30 days"},
+        ]
+        blocked = policy_agent.policy_confirmation_blockers(
+            self._draft({"days_since_delivery_lte": 30}),
+            other_yes,
+        )
+        self.assertEqual(
+            blocked[0]["detail"],
+            "This draft approves without a reason. "
+            "You have not said it applies to all reasons.",
+        )
+
+    def test_no_to_a_reason_limit_allows_a_rule_with_no_reason(self):
+        messages = [
+            {"role": "user", "content": "quick returns should be auto approved"},
+            {
+                "role": "assistant",
+                "content": (
+                    "Should the auto-approval include any conditions, "
+                    "such as the amount or the reason for the return?"
+                ),
+            },
+            {"role": "user", "content": "like a week\nno"},
+            {"role": "user", "content": "Confirmed: within 7 days of delivery."},
+        ]
+        self.assertEqual(
+            policy_agent.policy_confirmation_blockers(
+                self._draft({"days_since_delivery_lte": 7}),
+                messages,
+            ),
+            [],
+        )
+        refused = [
+            {
+                "role": "assistant",
+                "content": "Should this apply to all reasons, or just specific ones?",
+            },
+            {"role": "user", "content": "no\nwithin 7 days"},
+        ]
+        blocked = policy_agent.policy_confirmation_blockers(
+            self._draft({"days_since_delivery_lte": 7}),
+            refused,
+        )
+        self.assertEqual([item["kind"] for item in blocked], ["stated_reason"])
+
+    def test_not_all_reasons_does_not_name_every_reason(self):
+        blocked = policy_agent.policy_confirmation_blockers(
+            self._draft({"stated_reason": "wrong_size"}),
+            [{"role": "user", "content": "not all reasons, only late delivery"}],
+        )
+        self.assertEqual([item["kind"] for item in blocked], ["stated_reason"])
+
     def test_suggested_name_comes_from_rule_ids_and_skips_taken_names(self):
         draft = self._draft({"amount_usd_lte": 30})
         self.assertEqual(
@@ -912,7 +1068,7 @@ class PolicyAgentHostTests(unittest.TestCase):
             "[[clarify:tenure_months_gte|how long they have been a customer|6,12,24]]",
             instructions,
         )
-        self.assertIn("The page shows that topic and those buttons", instructions)
+        self.assertIn("The page shows the pick list only when you include that marker", instructions)
 
     def test_mocked_cannot_express_preserves_draft_in_turn(self):
         current = _template_draft()
@@ -1093,6 +1249,31 @@ class PolicyAgentHostTests(unittest.TestCase):
         self.assertEqual(turn["tool_results"], [])
         self.assertTrue(seen)
         self.assertTrue(all({"role", "content"} <= set(item) for item in seen[0]))
+
+    def test_reset_builder_session_drops_the_chat_and_keeps_other_keys(self):
+        state = {
+            "policy_management_messages": [{"role": "user", "content": "within 30 days"}],
+            "policy_management_draft": {"version": "x", "allow": [{"id": "old"}]},
+            "policy_management_preview_summary": {"matched": 3},
+            "policy_management_confirmed_thresholds": {"days_since_delivery_lte"},
+            "policy_management_pending_turn": "yes",
+            "policy_management_proposal": {"allow": [{"id": "old"}]},
+            "policy_management_name_step": True,
+            "policy_management_suggested_name": "old-name",
+            "policy_management_blocker": {"kind": "stated_reason", "detail": "held"},
+            "api_key": "leave-me",
+        }
+        policy_agent.reset_builder_session(state)
+        self.assertEqual(state["policy_management_messages"], [])
+        self.assertEqual(state["policy_management_draft"], _template_draft())
+        self.assertIsNone(state["policy_management_preview_summary"])
+        self.assertEqual(state["policy_management_confirmed_thresholds"], set())
+        self.assertIsNone(state["policy_management_pending_turn"])
+        self.assertIsNone(state["policy_management_proposal"])
+        self.assertFalse(state["policy_management_name_step"])
+        self.assertEqual(state["policy_management_suggested_name"], "")
+        self.assertIsNone(state["policy_management_blocker"])
+        self.assertEqual(state["api_key"], "leave-me")
 
     def test_ensure_session_defaults_initializes_template_draft(self):
         state: dict = {}

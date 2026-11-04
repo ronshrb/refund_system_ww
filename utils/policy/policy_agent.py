@@ -37,6 +37,7 @@ from utils.policy.policy_agent_utils import (
     QUERY_HISTORY_TOOL_NAME,
     apply_build_policy_result,
     assert_messages_safe_for_provider,
+    bare_adoption_reply,
     assistant_text_from_tool_results,
     build_policy_tool_schema,
     conversation_messages_for_provider,
@@ -51,6 +52,7 @@ from utils.policy.policy_agent_utils import (
     query_history_tool_schema,
     registered_tool_names,
     registered_tool_schemas,
+    reset_builder_session,
     save_policy_draft,
     suggest_policy_name,
     tool_result_for_model,
@@ -173,7 +175,10 @@ How to write rules (the validator rejects anything else):
 - Keep "version" from the current draft and set "status" to exactly "draft".
 - Conditions inside one "when" are AND. Separate rules are OR.
 - stated_reason takes exactly one string, never a list. For more than one
-  reason, write one rule per reason.
+  reason, write one rule per reason. When they say it applies to all reasons,
+  answer yes to that question, or answer no to adding a reason or other
+  conditions, omit stated_reason on that rule.
+  Do not copy an automatic rule into review_notes.
 - Each rule id is unique, short, and snake_case.
 - Example: {"id": "changed_mind_14d", "action": "approve_full", "all_of":
   [{"when": {"stated_reason": "changed_mind", "days_since_delivery_lte": 14}}]}
@@ -205,6 +210,10 @@ How you talk to the manager:
   numbers. Then ask whether this is what they want. Stop there.
   Do not ask for a name and do not say you are saving. The page asks for a
   name only after the manager agrees, and the page does the saving.
+- A later reply that is only yes does not change the draft. Do not call
+  build_policy again for that yes. If the page says it did not keep the
+  draft, do not build that same draft again. Ask for the missing words.
+  yes does not supply them.
 
 Light chain of thought (keep short, plain language):
 - Before asking a question or calling a tool, open with at most 3 short
@@ -249,8 +258,9 @@ Clarification before build_policy:
 - Example: they say "small stuff". The dictionary has a refund amount and a
   size reason. Ask which they mean, and quote what history shows for low
   amounts and for the size reason. Do not pick one.
-- Numbers the manager already stated (for example "within 14 days") are
-  confirmed. Do not ask about them again.
+- Numbers the manager already stated (for example "within 14 days",
+  "inside 30 days", or "7 days passed") are confirmed. Do not ask about
+  them again.
 - If the manager drops a qualifier from a rule, say plainly what the rule now
   covers (for example "every refund of $30 or less, for any reason") and ask
   once whether that wider rule is intended before building it.
@@ -271,10 +281,11 @@ Clarification before build_policy:
   [[clarify:amount_usd_lte|Small stuff from good customers|25,30,50]]
   [[clarify:tenure_months_gte|how long they have been a customer|6,12,24]]
   [[clarify:days_since_delivery_lte|days since delivery|7,14,30]]
-  The page shows that topic and those buttons, plus a custom number.
-  Use at most one marker per reply. Never add a marker when you are asking
-  what a vague phrase means, when you are not asking a question, when the
-  value is already confirmed, or when the manager dropped that requirement.
+- The page shows the pick list only when you include that marker. You decide
+  when a list is needed. Use at most one marker per reply. If the manager
+  already gave the number, or agreed to the number you asked about, do not
+  add the marker. Call build_policy. The page keeps that draft. It does not
+  check their exact wording.
 - If two or more thresholds are missing, ask only for the first one now and
   the next one after the manager answers.
 - Example, only after they said small stuff means the refund amount (marker

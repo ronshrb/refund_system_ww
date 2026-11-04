@@ -266,9 +266,16 @@ _THRESHOLD_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     ),
     "days_since_delivery_lte": (
         re.compile(rf"within\s*({_NUMBER})\s*days", re.IGNORECASE),
+        # "inside the 30 days window" is the same bound as "within 30 days".
+        re.compile(rf"inside\s+(?:the\s+)?({_NUMBER})\s*days", re.IGNORECASE),
     ),
     "days_since_delivery_gte": (
         re.compile(rf"(?:at least|more than)\s*({_NUMBER})\s*days", re.IGNORECASE),
+        # "7 days passed" and "7 days have passed" are the same bound as "at least 7 days".
+        re.compile(
+            rf"({_NUMBER})\s*days?\s+(?:have\s+|has\s+)?passed",
+            re.IGNORECASE,
+        ),
     ),
 }
 # Canonical reason codes. Free-text aliases are not confirmation.
@@ -277,8 +284,14 @@ _REASON_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("arrived_damaged", re.compile(r"arrived\s+damaged|\bdamaged\b", re.IGNORECASE)),
     ("wrong_size", re.compile(r"wrong\s+size", re.IGNORECASE)),
     ("wrong_item", re.compile(r"wrong\s+item", re.IGNORECASE)),
-    ("never_arrived", re.compile(r"never\s+arrived", re.IGNORECASE)),
+    ("never_arrived", re.compile(r"never\s+arrived|not\s+arrived", re.IGNORECASE)),
     ("late_delivery", re.compile(r"late\s+delivery", re.IGNORECASE)),
+)
+# "all reasons" names every canonical reason. "not all reasons" does not.
+_ALL_REASONS = re.compile(r"(?<!not\s)all reasons\b", re.IGNORECASE)
+_BARE_ADOPTION = re.compile(
+    r"(?:yes|y|yeah|yep|ok|okay|adopt|proceed|go ahead|save|save it)(?:\s+please)?\.?",
+    re.IGNORECASE,
 )
 
 
@@ -323,18 +336,94 @@ def _threshold_confirmed(
     return any(wanted == captured for captured in bound.get(field, ()))
 
 
+def _message_text(message: Mapping[str, str]) -> str:
+    content = message.get("content") or ""
+    return content if isinstance(content, str) else ""
+
+
+def _asks_regardless_of_reason(text: str) -> bool:
+    """Return whether this question asks if every reason should be included.
+
+    "Regardless of the reason?" is answered with yes. It is not the question
+    that asks her to add a reason limit.
+    """
+    if "?" not in text:
+        return False
+    return re.search(
+        r"regardless of the reason|no matter the reason|\bany reason\b|\bevery reason\b",
+        text,
+        re.IGNORECASE,
+    ) is not None
+
+
+def _asks_whether_to_limit_reason(text: str) -> bool:
+    """Return whether this question asks her to add a reason limit.
+
+    "Should this include any conditions, such as the reason?" is that question.
+    "All reasons, or just specific ones?" and "regardless of the reason?" are
+    answered with yes.
+    """
+    if "?" not in text or _ALL_REASONS.search(text) or _asks_regardless_of_reason(text):
+        return False
+    return re.search(r"\breason\b|any conditions", text, re.IGNORECASE) is not None
+
+
+def _confirmed_all_reasons(messages: Sequence[Mapping[str, str]]) -> bool:
+    """Return whether she said the rule applies to every reason.
+
+    "all reasons" in her own words counts. So does "yes" when the previous
+    assistant message asked all reasons, specific ones, or regardless of the
+    reason. "no" counts when that message asked whether to add a reason or
+    other conditions. A yes or no to any other question does not. Assistant
+    text never counts as her words.
+    """
+    user_text = "\n".join(
+        _message_text(message)
+        for message in messages
+        if message.get("role") == "user"
+    )
+    if _ALL_REASONS.search(user_text):
+        return True
+    if re.search(r"\b(?:no reason|any reason|every reason|no conditions)\b", user_text, re.IGNORECASE):
+        return True
+    asked_all = False
+    asked_open = False
+    for message in messages:
+        text = _message_text(message)
+        if message.get("role") == "assistant":
+            asked_all = (
+                "?" in text and _ALL_REASONS.search(text) is not None
+            ) or _asks_regardless_of_reason(text)
+            asked_open = _asks_whether_to_limit_reason(text)
+            continue
+        if message.get("role") != "user":
+            continue
+        if asked_all and re.match(
+            r"\s*(?:yes|yeah|yep|all of them|every reason|any reason)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return True
+        # "like a week\nno" answers the reason question on its own line.
+        if asked_open and re.search(r"(?m)^\s*no\b", text, re.IGNORECASE):
+            return True
+        asked_all = False
+        asked_open = False
+    return False
+
+
 def policy_confirmation_blockers(
     draft: Mapping[str, Any], user_messages: Sequence[Mapping[str, str]]
 ) -> list[dict[str, str]]:
     """Return reasons a built draft must not be offered for approval yet.
 
     The page uses this instead of trusting the model. A number counts only
-    for the field her words named. Every allow rule needs a reason she named.
-    Vague phrases still do not invent a tenure or an amount that the draft
-    does not already contain.
+    for the field her words named. A rule with no reason is allowed only
+    after she says it applies to all reasons. Vague phrases still do not
+    invent a tenure or an amount that the draft does not already contain.
     """
     user_text = "\n".join(
-        message.get("content") or ""
+        _message_text(message)
         for message in user_messages
         if message.get("role") == "user"
     )
@@ -342,6 +431,9 @@ def policy_confirmation_blockers(
     named_reasons = {
         code for code, pattern in _REASON_PATTERNS if pattern.search(user_text)
     }
+    all_reasons = _confirmed_all_reasons(user_messages)
+    if all_reasons:
+        named_reasons.update(code for code, _pattern in _REASON_PATTERNS)
     blockers: list[dict[str, str]] = []
     seen: set[str] = set()
     for rule in draft.get("allow") or []:
@@ -367,7 +459,19 @@ def policy_confirmation_blockers(
             reason = conditions.get("stated_reason")
             if isinstance(reason, str) and reason:
                 rule_reasons.append(reason)
-        # Block when this rule has no reason she named. One stated_reason blocker is enough.
+        # A rule with no reason approves every reason. That needs her "all reasons"
+        # (or yes to that question). One stated_reason blocker is enough.
+        if not rule_reasons:
+            if all_reasons or "stated_reason" in seen:
+                continue
+            seen.add("stated_reason")
+            blockers.append(
+                {
+                    "kind": "stated_reason",
+                    "detail": _unconfirmed_detail("stated_reason", "missing"),
+                }
+            )
+            continue
         if "stated_reason" in seen or any(reason in named_reasons for reason in rule_reasons):
             continue
         seen.add("stated_reason")
@@ -398,7 +502,23 @@ def _unconfirmed_detail(field: str, value: Any) -> str:
         return (
             f"This draft uses at least {shown} days. You have not said at least {shown} days."
         )
+    if shown == "missing":
+        return (
+            "This draft approves without a reason. "
+            "You have not said it applies to all reasons."
+        )
     return f"This draft uses the reason {shown}, which you have not named."
+
+
+def bare_adoption_reply(text: str) -> bool:
+    """Return whether the manager only agreed, with no new rule in the words.
+
+    "yes" adopts or repeats the draft already on the page. "no, it should be
+    30 days" is a change, so it is not an adoption reply.
+    """
+    if not isinstance(text, str):
+        return False
+    return _BARE_ADOPTION.fullmatch(text.strip()) is not None
 
 
 def suggest_policy_name(
@@ -929,6 +1049,34 @@ def assert_messages_safe_for_provider(
                 "Provider payload must not include customer request rows, IDs, "
                 "or customer/support note text."
             )
+
+
+def reset_builder_session(
+    session_state: MutableMapping[str, Any],
+    *,
+    messages_key: str = "policy_management_messages",
+    draft_key: str = "policy_management_draft",
+    preview_key: str = "policy_management_preview_summary",
+    confirmed_key: str = "policy_management_confirmed_thresholds",
+    pending_key: str = "policy_management_pending_turn",
+    proposal_key: str = "policy_management_proposal",
+    name_step_key: str = "policy_management_name_step",
+    suggested_name_key: str = "policy_management_suggested_name",
+    blocker_key: str = "policy_management_blocker",
+) -> None:
+    """Drop the builder conversation and unsaved draft.
+
+    Saved policy files and the live pointer are not touched.
+    """
+    session_state[messages_key] = []
+    session_state[draft_key] = load_template_draft()
+    session_state[preview_key] = None
+    session_state[confirmed_key] = set()
+    session_state[pending_key] = None
+    session_state[proposal_key] = None
+    session_state[name_step_key] = False
+    session_state[suggested_name_key] = ""
+    session_state[blocker_key] = None
 
 
 def ensure_session_defaults(

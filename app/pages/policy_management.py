@@ -38,7 +38,6 @@ from utils.policy.live_policy import (
 )
 from utils.policy.policy_agent_utils import (
     CLARIFY_MARKER_PATTERN,
-    CLARIFY_PRESET_PATTERNS,
     CLARIFY_PRESET_VALUES,
     HISTORY_PATH,
     POLICIES_DIR,
@@ -64,6 +63,7 @@ _SESSION_PROPOSAL_KEY = "policy_management_proposal"
 _SESSION_NAME_STEP_KEY = "policy_management_name_step"
 _SESSION_SUGGESTED_NAME_KEY = "policy_management_suggested_name"
 _SESSION_BLOCKER_KEY = "policy_management_blocker"
+_SESSION_CLEAR_KEY = "policy_management_clear_chat"
 _READY_MARKER = "[[ready_to_build]]"
 _PARTIAL_MARKER = re.compile(r"\[(\[[^\]]*\]?)?$")
 
@@ -88,31 +88,6 @@ def _quick_pick_presets(kind: str, values: tuple[int, ...]) -> list[tuple[str, i
 def _strip_clarify_markers(text: str) -> str:
     """Remove UI-only markers from assistant text shown to the manager."""
     return CLARIFY_MARKER_PATTERN.sub("", text).replace(_READY_MARKER, "").rstrip()
-
-def _pending_clarify_kind(
-    messages: list[dict[str, str]], confirmed: set[str]
-) -> str | None:
-    """Return the threshold the latest assistant message is asking for, if any.
-
-    Uses the hidden marker when present. The model sometimes forgets it, so
-    the preset list it was told to offer (e.g. "$25, $30, $50") also counts.
-    Thresholds the manager already picked are skipped; if several are asked,
-    the first one in the text wins.
-    """
-    for message in reversed(messages):
-        if message.get("role") != "assistant":
-            continue
-        text = message.get("content") or ""
-        found = [(m.start(), m.group(1)) for m in CLARIFY_MARKER_PATTERN.finditer(text)]
-        for kind, pattern in CLARIFY_PRESET_PATTERNS.items():
-            match = pattern.search(text)
-            if match:
-                found.append((match.start(), kind))
-        for _, kind in sorted(found):
-            if kind not in confirmed:
-                return kind
-        return None
-    return None
 
 
 def _markdown_safe(text: str) -> str:
@@ -155,8 +130,6 @@ def _run_manager_turn(user_text: str) -> None:
     """Show the user turn, stream the agent reply, and update session state."""
     messages = st.session_state[_SESSION_MESSAGES_KEY]
     history_before = list(messages)
-    previous_draft = st.session_state[_SESSION_DRAFT_KEY]
-    previous_preview = st.session_state.get(_SESSION_PREVIEW_KEY)
     messages.append({"role": "user", "content": user_text})
     with st.chat_message("user"):
         _render_user_text(user_text)
@@ -188,30 +161,16 @@ def _run_manager_turn(user_text: str) -> None:
 
     messages.append({"role": "assistant", "content": turn["assistant_text"]})
 
-    # The page, not the model, decides what happens after a build. The offer
-    # waits until each number is bound to the field she named and each allow
-    # rule uses a reason she named. Otherwise the working draft stays as it was.
+    # A successful build is the draft the manager can save. The drafter decides
+    # when a pick list is needed, by including a clarify marker. The page does
+    # not reject the draft for wording.
     st.session_state[_SESSION_NAME_STEP_KEY] = False
+    st.session_state[_SESSION_BLOCKER_KEY] = None
     if not turn["draft_updated"]:
         st.session_state[_SESSION_PROPOSAL_KEY] = None
-        st.session_state[_SESSION_BLOCKER_KEY] = None
-        return
-
-    blockers = policy_agent.policy_confirmation_blockers(
-        turn["draft"], [item for item in messages if item["role"] == "user"]
-    )
-    if blockers:
-        st.session_state[_SESSION_DRAFT_KEY] = previous_draft
-        if previous_preview is None:
-            st.session_state.pop(_SESSION_PREVIEW_KEY, None)
-        else:
-            st.session_state[_SESSION_PREVIEW_KEY] = previous_preview
-        st.session_state[_SESSION_PROPOSAL_KEY] = None
-        st.session_state[_SESSION_BLOCKER_KEY] = blockers[0]
         return
 
     st.session_state[_SESSION_PROPOSAL_KEY] = turn["draft"]
-    st.session_state[_SESSION_BLOCKER_KEY] = None
 
 
 def _history_rows():
@@ -551,6 +510,20 @@ def _render_policy_picker() -> None:
         )
 
 
+def _agent_pick(messages: list[dict[str, str]], confirmed: set[str]) -> dict | None:
+    """Return the pick list the drafter asked for, if it has not been answered.
+
+    The drafter decides. A list appears only from its clarify marker.
+    """
+    parsed = parse_clarify_marker(_latest_assistant_text(messages))
+    if not parsed:
+        return None
+    kind = parsed.get("kind")
+    if kind not in CLARIFY_PRESET_VALUES or kind in confirmed:
+        return None
+    return parsed
+
+
 def _render_policy_builder() -> None:
     """Existing chatbot. Save writes a draft and does not move the live pointer."""
     policy_agent.ensure_session_defaults(
@@ -626,53 +599,91 @@ def _render_policy_builder() -> None:
                 else:
                     _save_proposal(name)
 
-    blocker = st.session_state[_SESSION_BLOCKER_KEY]
-    # No preset list for these kinds. A button would confirm a cap or a within-N-days window.
-    if blocker and blocker["kind"] not in CLARIFY_PRESET_VALUES:
-        st.info(blocker["detail"])
-    else:
-        clarify_kind = (
-            blocker["kind"]
-            if blocker
-            else _pending_clarify_kind(messages, st.session_state[_SESSION_CONFIRMED_KEY])
-        )
-        if clarify_kind and _key_ready and policy_agent.llm_configured() and st.session_state[_SESSION_PROPOSAL_KEY] is None:
-            st.subheader("Quick pick")
-            if blocker:
-                st.info(blocker["detail"])
-            _ask_text = blocker["detail"] if blocker else _latest_assistant_text(messages)
-            _parsed = None if blocker else parse_clarify_marker(_ask_text)
-            _values = (
-                _parsed["values"]
-                if _parsed and _parsed["values"]
-                else CLARIFY_PRESET_VALUES[clarify_kind]
+    pick = _agent_pick(messages, st.session_state[_SESSION_CONFIRMED_KEY])
+    if (
+        pick
+        and _key_ready
+        and policy_agent.llm_configured()
+        and st.session_state[_SESSION_PROPOSAL_KEY] is None
+    ):
+        st.subheader("Quick pick")
+        kind = pick["kind"]
+        values = pick["values"] or CLARIFY_PRESET_VALUES[kind]
+        if pick["topic"]:
+            st.caption(
+                f"{pick['topic']}. Choose one of these or enter a custom value — "
+                "one clear answer so we do not invent a threshold."
             )
-            if _parsed and _parsed["topic"]:
-                st.caption(
-                    f"{_parsed['topic']}. Choose one of these or enter a custom value — "
-                    "one clear answer so we do not invent a threshold."
-                )
-            else:
-                st.caption(clarify_pick_caption(clarify_kind, _ask_text))
-            cols = st.columns(len(_values) + 1)
-            for index, (label, value) in enumerate(_quick_pick_presets(clarify_kind, _values)):
-                if cols[index].button(label, key=f"clarify_preset_{clarify_kind}_{value}"):
-                    _confirm_pick(clarify_kind, value)
+        else:
+            st.caption(clarify_pick_caption(kind, _latest_assistant_text(messages)))
+        cols = st.columns(len(values) + 1)
+        for index, (label, value) in enumerate(_quick_pick_presets(kind, values)):
+            if cols[index].button(label, key=f"clarify_preset_{kind}_{value}"):
+                _confirm_pick(kind, value)
 
-            with cols[-1]:
-                custom = st.number_input(
-                    "Custom",
-                    min_value=0,
-                    step=1,
-                    value=0,
-                    key=f"clarify_custom_{clarify_kind}",
-                )
-                if st.button("Use custom", key=f"clarify_custom_btn_{clarify_kind}"):
-                    _confirm_pick(clarify_kind, int(custom))
+        with cols[-1]:
+            custom = st.number_input(
+                "Custom",
+                min_value=0,
+                step=1,
+                value=0,
+                key=f"clarify_custom_{kind}",
+            )
+            if st.button("Use custom", key=f"clarify_custom_btn_{kind}"):
+                _confirm_pick(kind, int(custom))
+
+    _render_new_chat()
 
     prompt = st.chat_input("Describe a policy change…", disabled=not _key_ready)
-    if prompt:
+    if prompt and policy_agent.bare_adoption_reply(prompt) and (
+        st.session_state[_SESSION_PROPOSAL_KEY] is not None
+        and not st.session_state[_SESSION_NAME_STEP_KEY]
+    ):
+        st.session_state[_SESSION_NAME_STEP_KEY] = True
+        st.session_state[_SESSION_SUGGESTED_NAME_KEY] = (
+            policy_agent.suggest_policy_name(st.session_state[_SESSION_PROPOSAL_KEY])
+        )
+        st.rerun()
+    elif prompt:
         _queue_turn(prompt)
+
+
+def _render_new_chat() -> None:
+    """Offer a new chat that deletes this conversation and the unsaved draft."""
+    st.session_state.setdefault(_SESSION_CLEAR_KEY, False)
+    if st.button(
+        "New chat",
+        icon=":material/add_comment:",
+        help="Delete this conversation and the unsaved draft. Saved policies stay.",
+        key="policy_new_chat",
+    ):
+        st.session_state[_SESSION_CLEAR_KEY] = True
+    if not st.session_state[_SESSION_CLEAR_KEY]:
+        return
+    st.warning(
+        "The conversation and the unsaved draft are removed. Saved policies stay.",
+        title="Delete this chat?",
+    )
+    with st.container(horizontal=True):
+        if st.button("Delete chat", type="primary", key="policy_delete_chat"):
+            policy_agent.reset_builder_session(
+                st.session_state,
+                messages_key=_SESSION_MESSAGES_KEY,
+                draft_key=_SESSION_DRAFT_KEY,
+                preview_key=_SESSION_PREVIEW_KEY,
+                confirmed_key=_SESSION_CONFIRMED_KEY,
+                pending_key=_SESSION_PENDING_KEY,
+                proposal_key=_SESSION_PROPOSAL_KEY,
+                name_step_key=_SESSION_NAME_STEP_KEY,
+                suggested_name_key=_SESSION_SUGGESTED_NAME_KEY,
+                blocker_key=_SESSION_BLOCKER_KEY,
+            )
+            st.session_state[_SESSION_CLEAR_KEY] = False
+            st.session_state[_SESSION_NOTICE_KEY] = ("success", "Started a new chat.")
+            st.rerun()
+        if st.button("Keep this chat", key="policy_keep_chat"):
+            st.session_state[_SESSION_CLEAR_KEY] = False
+            st.rerun()
 
 
 def _save_proposal(name: str) -> None:
