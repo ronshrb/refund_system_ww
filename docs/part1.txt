@@ -1,0 +1,47 @@
+few thought from going over history.csv:
+1. prior_refunds_12m/tenure_months
+    number of refunds in the last 12 months / amount of time in months the user is in the system
+    we can create a metric that tells us how often the user asks for refund, which can help us flag it as fraud maybe?
+    maybe we can use something like:
+    SELECT fraud_flag, AVG(prior_refunds_12m/MIN(12,tenure_months))
+    FROM read_csv('c:/projects/ww_inter/data/history.csv')
+    GROUP BY fraud_flag
+
+
+
+questions:
+1. what is considered a good customer?
+2. small stuff = cheap? where is the limit?
+
+
+first step: classify as auto approve
+"Change of mind: we accept returns within 14 days of delivery. No exceptions." - days_since_delivery <= 14
+or
+"Small stuff from good customers goes through automatically. IT set that up last year." - what are considered good customers?
+or
+"Damaged on arrival: we need a photo for anything over $50." - amount_usd <= 50, but maybe need to also check fraud
+or
+has to have:
+1. fraud_flag = no (also N, false?)
+2. 
+
+or
+"Our mistake (wrong item, picking error): refund in full, no questions asked."
+if support_note has 'matches order line'
+
+If it is the company’s fault — wrong item or a warehouse pick — pay the full amount_usd. Do not haggle, do not issue a percent, do not ask the customer to prove more once the mistake is confirmed.
+
+If the item is only cosmetically damaged, or it arrived late — a person decides. Full refund, shipping only, or some other percent. That is decision=partial plus an outcome_note. Auto never does this.
+
+stated_reason=wrong_item is the customer’s claim, not proof. The proof sits in support_note.
+
+Our mistake, full refund. Notes like confirmed picking error or Warehouse confirms mis-pick go with decision=approved for the whole amount. Examples: RF-2041, RF-2049, RF-2098, RF-1056. No wrong_item row is a partial.
+
+Not our mistake, rejected. Notes like matches order line mean they sent what was ordered. Examples: RF-1006, RF-2054, RF-1041. RF-2143 was rejected first; outcome_note later says the warehouse confirmed a mis-pick and they refunded on appeal. That is the “no questions asked” rule applied late.
+
+or
+" Partials for cosmetic damage or late delivery are the reviewer's call."
+"Late delivery, shipping only: RF-2018, RF-2028, RF-1050, RF-2194 (outcome_note=shipping refunded only). Other late rows were still full approved, including some auto (RF-2033, RF-2045). Same reason, different call.
+Cosmetic damage: RF-2079 (25%), RF-1060 and RF-2162 (30%). Notes say scuff / scratch / cosmetic only. Broken-item damage with photos (two of six glasses) was full approved, not a percent (RF-2084, RF-2087, RF-2125)."
+
+
