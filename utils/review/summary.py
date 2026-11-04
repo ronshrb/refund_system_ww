@@ -8,6 +8,7 @@ guidance, not a decision.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from utils.data.data_processing import normalize_reason, parse_amount
@@ -84,6 +85,91 @@ def summarize_open_row(open_row: Mapping, policy: Mapping | None) -> str:
     return "\n".join(lines)
 
 
+# Product categories from the data dictionary. A general note that names one
+# of these applies only to a row in that category.
+_CATEGORIES = ("apparel", "home", "electronics")
+
+
+def policy_notes_block(
+    policy: Mapping | None,
+    stated_reason: object,
+    category: object = None,
+) -> str:
+    """Relevant reviewer notes for this request, or an empty string.
+
+    A note is relevant when its reason is this row's cleaned stated reason.
+    A general note is relevant when it names no category, or when it names
+    this row's category. A home-category note is not shown on apparel.
+    Reason-specific notes come first. The manager's words stay as written.
+    These notes do not approve a refund.
+    """
+    texts = _applicable_note_texts(policy, stated_reason, category)
+    if not texts:
+        return ""
+    bullets = "\n".join(f"- {text}" for text in texts)
+    return f"Policy notes:\n{bullets}"
+
+
+def matching_category_note(policy: Mapping | None, category: object) -> str:
+    """Return a general note that names this row's category, or an empty string.
+
+    A note that names no category is not returned. That kind of note does
+    not by itself stop an auto-approve. The words are the manager's.
+    """
+    row = category.strip().casefold() if isinstance(category, str) else ""
+    if row not in _CATEGORIES:
+        return ""
+    matched: list[str] = []
+    for note in _review_notes(policy):
+        if not isinstance(note, Mapping) or note.get("reason") != "general":
+            continue
+        text = note.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if row in _named_categories(text):
+            matched.append(text.strip())
+    return " ".join(matched)
+
+
+def _applicable_note_texts(
+    policy: Mapping | None,
+    stated_reason: object,
+    category: object,
+) -> list[str]:
+    """Reason matches first, then general notes that fit this category."""
+    cleaned = normalize_reason(stated_reason)
+    specific: list[str] = []
+    general: list[str] = []
+    for note in _review_notes(policy):
+        if not isinstance(note, Mapping):
+            continue
+        reason = note.get("reason")
+        text = note.get("text")
+        if not isinstance(reason, str) or not isinstance(text, str) or not text.strip():
+            continue
+        if reason == "general":
+            if _general_note_fits(text, category):
+                general.append(text.strip())
+        elif cleaned is not None and reason == cleaned:
+            specific.append(text.strip())
+    return specific + general
+
+
+def _general_note_fits(text: str, category: object) -> bool:
+    """A general note fits when it names this category, or names none."""
+    named = _named_categories(text)
+    if not named:
+        return True
+    row = category.strip().casefold() if isinstance(category, str) else ""
+    return row in named
+
+
+def _named_categories(text: str) -> list[str]:
+    """Categories named in a note, using the dictionary words only."""
+    folded = text.casefold()
+    return [name for name in _CATEGORIES if re.search(rf"\b{name}\b", folded)]
+
+
 def reason_sentence(reason: object) -> str:
     """Plain sentence for one policy reason code.
 
@@ -126,23 +212,27 @@ def _yes_no(present: bool) -> str:
 
 
 def _guidance_lines(policy: Mapping | None, cleaned: str | None) -> list[str]:
-    notes = _review_notes(policy)
+    # Quote the manager's words unchanged, including words this summary
+    # will not say in its own voice.
+    return [f"{GUIDANCE_PREFIX} {text}" for text in _note_texts(policy, cleaned)]
+
+
+def _note_texts(policy: Mapping | None, cleaned: str | None) -> list[str]:
+    """Reason-specific notes for this row, then every general note."""
     specific: list[str] = []
     general: list[str] = []
-    for note in notes:
+    for note in _review_notes(policy):
         if not isinstance(note, Mapping):
             continue
         reason = note.get("reason")
         text = note.get("text")
         if not isinstance(reason, str) or not isinstance(text, str) or not text.strip():
             continue
-        # Quote the manager's words unchanged, including words this summary
-        # will not say in its own voice.
         if reason == "general":
-            general.append(text)
+            general.append(text.strip())
         elif cleaned is not None and reason == cleaned:
-            specific.append(text)
-    return [f"{GUIDANCE_PREFIX} {text}" for text in specific + general]
+            specific.append(text.strip())
+    return specific + general
 
 
 def _review_notes(policy: Mapping | None) -> list:

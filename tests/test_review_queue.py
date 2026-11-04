@@ -652,6 +652,65 @@ class ReviewQueueTests(unittest.TestCase):
             ]),
         )
 
+    def test_policy_notes_block_lists_matching_notes_before_general(self):
+        from utils.review.summary import policy_notes_block
+
+        home = "Refunds for home category should go to review."
+        damaged = "A chip in the glaze stays with a person."
+        carrier = "Check the carrier signature before answering."
+        policy = {
+            "review_notes": [
+                {"reason": "general", "text": home},
+                {"reason": "arrived_damaged", "text": damaged},
+                {"reason": "never_arrived", "text": carrier},
+            ],
+        }
+        shown = policy_notes_block(policy, "arrived damaged", "home")
+        self.assertEqual(
+            shown,
+            "Policy notes:\n"
+            f"- {damaged}\n"
+            f"- {home}",
+        )
+        apparel = policy_notes_block(policy, "arrived damaged", "apparel")
+        self.assertEqual(apparel, f"Policy notes:\n- {damaged}")
+        self.assertNotIn(home, apparel)
+        self.assertNotIn(carrier, shown)
+        self.assertNotIn("arrived_damaged", shown)
+        self.assertNotIn("general", shown)
+        self.assertEqual(
+            policy_notes_block(policy, "changed_mind", "home"),
+            f"Policy notes:\n- {home}",
+        )
+        self.assertEqual(policy_notes_block(policy, "changed_mind", "apparel"), "")
+        self.assertEqual(policy_notes_block(None, "arrived_damaged", "home"), "")
+        page = (_REPO / "app" / "pages" / "reviews.py").read_text(encoding="utf-8")
+        self.assertLess(page.index("policy_notes_block("), page.index('st.subheader("Review summary")'))
+
+    def test_a_category_note_keeps_that_match_with_a_person(self):
+        home = "Refunds for home category should go to review."
+        policy = json.loads(json.dumps(_MATCHING_POLICY))
+        policy["review_notes"] = [{"reason": "general", "text": home}]
+        self._write_policy(self.policies, "small.json", policy)
+        make_live("small.json", policies_dir=self.policies)
+        model = _ReviewChatModel(checkup=True, hold=False, reviewer_comment="Leave this one.")
+        result = classify_upload(
+            [
+                _matching("RF-HOME", category="home", customer_id="CU-HOME"),
+                _matching("RF-APPAREL", category="apparel", customer_id="CU-APP"),
+            ],
+            log_path=self.log_path,
+            policies_dir=self.policies,
+            clock=_clock,
+            chat_model=model,
+        )
+        self.assertEqual(_ids(result["auto"]), ["RF-APPAREL"])
+        held = next(row for row in result["open"] if row["request_id"] == "RF-HOME")
+        self.assertEqual(held["reason"], "review_note_hold")
+        self.assertIn(home, held["reviewer_comment"])
+        self.assertNotIn("RF-HOME", {row["request_id"] for row in load_decisions(self.log_path)})
+        self.assertIn("names a category", review_agent.CHECKUP_INSTRUCTIONS)
+
     def test_similar_history_cap_sort_and_unrecognized_reason(self):
         def hist(request_id, requested_at, reason="changed_mind"):
             return {

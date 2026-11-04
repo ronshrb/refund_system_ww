@@ -35,6 +35,7 @@ from utils.policy.live_policy import (
     make_live_button_disabled,
     preview_auto_approvals,
     read_live_policy,
+    review_notes_text,
 )
 from utils.policy.policy_agent_utils import (
     CLARIFY_MARKER_PATTERN,
@@ -200,6 +201,19 @@ def _stored_summary_text(policy) -> str:
     if isinstance(summary, str) and summary.strip():
         return summary
     return "This file has no summary."
+
+
+def _policy_file_text(policy) -> str:
+    """Stored auto-approve summary, then any reviewer notes on the same file.
+
+    The notes are shown so the manager can read them. They are not part of
+    the stored summary and they do not change what would auto-approve.
+    """
+    summary = _stored_summary_text(policy)
+    notes = review_notes_text(policy)
+    if not notes:
+        return summary
+    return f"{summary}\n\n{notes}"
 
 
 def _percent_label(value: float | None) -> str:
@@ -426,7 +440,7 @@ def _render_policy_picker() -> None:
                 key="policy_picker_selection",
             )
             candidate, candidate_error = _load_candidate(selected)
-            st.markdown(_markdown_safe(_stored_summary_text(candidate)))
+            st.markdown(_markdown_safe(_policy_file_text(candidate)))
             # Already-live stays disabled, and the click guard does not write the pointer.
             already_live = make_live_button_disabled(selected, live_file)
             make_clicked = st.button(
@@ -445,7 +459,7 @@ def _render_policy_picker() -> None:
             if compare_with not in (_NO_COMPARE, _WITHOUT_POLICY):
                 compared, _compared_error = _load_candidate(compare_with)
                 if compared is not None:
-                    st.markdown(_markdown_safe(_stored_summary_text(compared)))
+                    st.markdown(_markdown_safe(_policy_file_text(compared)))
         if selected and make_clicked and not already_live:
             try:
                 make_live(selected)

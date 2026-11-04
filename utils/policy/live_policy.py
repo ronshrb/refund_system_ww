@@ -248,6 +248,28 @@ def summarize_policy(policy) -> str:
     return "A full refund is auto-approved when any of these is true:\n\n" + bullets
 
 
+def review_notes_text(policy) -> str:
+    """Plain-language reviewer notes stored on a policy, or an empty string.
+
+    These notes are guidance for a person. They do not auto-approve a refund
+    and they do not send a request to review. The reason code is omitted.
+    A missing list, a non-list, or a note with no text adds nothing.
+    """
+    notes = policy.get("review_notes") if isinstance(policy, Mapping) else None
+    if not isinstance(notes, list):
+        return ""
+    lines: list[str] = []
+    for note in notes:
+        if not isinstance(note, Mapping):
+            continue
+        text = note.get("text")
+        if isinstance(text, str) and text.strip():
+            lines.append(f"- {text.strip()}")
+    if not lines:
+        return ""
+    return "Notes for a reviewer:\n\n" + "\n".join(lines)
+
+
 def _summary_sentence(rule) -> str:
     """One auto-approve rule as a sentence a manager can read."""
     clauses = [_summary_clause(operator, expected) for operator, expected in _conditions(rule)]

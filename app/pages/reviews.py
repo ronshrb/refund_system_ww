@@ -38,6 +38,7 @@ from utils.review.history_lookup import (
     UNRECOGNIZED_REASON,
     similar_history,
 )
+from utils.review.summary import policy_notes_block
 from utils.review.sheet import (
     apply_user_decision,
     build_review_sheet,
@@ -583,6 +584,15 @@ if _selected is not None:
     _notice = repeat_notice(_later, _related)
     if _notice:
         _comment = f"{_comment.rstrip()} {_notice}"
+    # Notes that apply to this request come first. The model comment stays
+    # after them and still does not decide the row.
+    _notes = policy_notes_block(
+        _policy,
+        _intake.get("stated_reason"),
+        _intake.get("category"),
+    )
+    if _notes:
+        _comment = f"{_notes}\n\n{_comment}"
     st.session_state["review_summary_text"] = _comment
     _summary_col, _decision_col = st.columns(2, vertical_alignment="top")
     with _summary_col:

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "status": "draft",
+  "summary": "A full refund is auto-approved when any of these is true:\n\n- It was delivered within 7 days.",
+  "allow": [
+    {
+      "id": "quick_requests_7d",
+      "action": "approve_full",
+      "all_of": [
+        {
+          "when": {
+            "days_since_delivery_lte": 7
+          }
+        }
+      ]
+    }
+  ],
+  "review_notes": [
+    {
+      "reason": "general",
+      "text": "Refunds for home category should go to review."
+    }
+  ]
+}

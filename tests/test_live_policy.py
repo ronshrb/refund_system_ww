@@ -22,6 +22,7 @@ from utils.policy.live_policy import (
     historical_auto_approvals,
     history_outcome_rates,
     preview_auto_approvals,
+    review_notes_text,
     summarize_policy,
 )
 from utils.policy.policy_evaluator import validate_policy
@@ -192,6 +193,20 @@ class LivePolicyTests(unittest.TestCase):
         ):
             self.assertNotIn(operator, text)
         self.assertNotIn("Carrier signature", text)
+        notes = review_notes_text(policy)
+        self.assertEqual(
+            notes,
+            "Notes for a reviewer:\n\n"
+            "- Carrier signature is not an auto-approve rule.",
+        )
+        self.assertNotIn("never_arrived", notes)
+        self.assertEqual(review_notes_text({"review_notes": []}), "")
+        self.assertEqual(review_notes_text({}), "")
+        self.assertEqual(review_notes_text("not-a-policy"), "")
+        self.assertEqual(
+            review_notes_text({"review_notes": [{"reason": "general"}]}),
+            "",
+        )
         empty = "No rule auto-approves a refund, so a person decides."
         self.assertEqual(summarize_policy({"allow": []}), empty)
         self.assertEqual(summarize_policy({}), empty)
@@ -490,7 +505,7 @@ class LivePolicyTests(unittest.TestCase):
         self.assertIn("Evaluated on history", source)
         self.assertIn("Download data", source)
         self.assertEqual(
-            source.count("st.markdown(_markdown_safe(_stored_summary_text("), 2
+            source.count("st.markdown(_markdown_safe(_policy_file_text("), 2
         )
         self.assertIn(
             "Compared with auto approved requests from history data", source
