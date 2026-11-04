@@ -509,6 +509,41 @@ def _release_exclusive_lock(lock_fd: int) -> None:
     fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
 
+def review_policy_changed(saved_file: object, live_file: object) -> bool:
+    """Return whether a saved review was run under a different live file.
+
+    A missing saved name and a missing live file are the same: nothing to
+    refresh. Any other difference means the queue still belongs to the
+    previous policy.
+    """
+    saved = saved_file.strip() if isinstance(saved_file, str) else ""
+    live = live_file.strip() if isinstance(live_file, str) else ""
+    return saved != live
+
+
+def without_other_policy_autos(records: list, live_file: object) -> list:
+    """Drop simulated auto rows that were written under another policy.
+
+    A reviewer's own decision stays. An auto row with no policy file is
+    dropped once a live file is set, and kept only while there is still
+    no live file. This does not write the log.
+    """
+    live = live_file.strip() if isinstance(live_file, str) else ""
+    kept = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            kept.append(record)
+            continue
+        if record.get("decided_by") != "auto":
+            kept.append(record)
+            continue
+        recorded = record.get("policy_file")
+        recorded_name = recorded.strip() if isinstance(recorded, str) else ""
+        if recorded_name == live:
+            kept.append(record)
+    return kept
+
+
 def _policy_file_name(value: object) -> str | None:
     """Keep a file name. Refuse a path so the log cannot point outside policies."""
     if not isinstance(value, str):

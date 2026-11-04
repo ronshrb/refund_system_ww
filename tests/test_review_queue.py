@@ -1633,6 +1633,9 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertNotIn("Approve all", page)
         self.assertNotIn("evaluate(", page)
         self.assertNotIn("Live policy:", page)
+        self.assertIn('f"Policy: {_live_file}"', page)
+        self.assertIn("review_policy_changed", page)
+        self.assertIn("without_other_policy_autos", page)
         self.assertIn("st.expander", page)
         self.assertIn('st.text_input("Search"', page)
         self.assertIn("review_agent_cache", page)
@@ -1667,6 +1670,26 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertIn("cannot create an approval", agent_source)
         self.assertIn("not a reason to hold", agent_source)
         self.assertIn("not a reason to pay", agent_source)
+
+    def test_a_new_live_file_drops_the_other_policys_auto_rows(self):
+        from utils.review.decisions import review_policy_changed, without_other_policy_autos
+
+        records = [
+            {"request_id": "RF-OLD", "decided_by": "auto", "policy_file": "old.json"},
+            {"request_id": "RF-SAME", "decided_by": "auto", "policy_file": "new.json"},
+            {"request_id": "RF-PERSON", "decided_by": "user", "policy_file": "old.json"},
+            {"request_id": "RF-BLANK", "decided_by": "auto", "policy_file": None},
+        ]
+        kept = without_other_policy_autos(records, "new.json")
+        self.assertEqual(
+            [row["request_id"] for row in kept],
+            ["RF-SAME", "RF-PERSON"],
+        )
+        self.assertTrue(review_policy_changed("old.json", "new.json"))
+        self.assertTrue(review_policy_changed(None, "new.json"))
+        self.assertFalse(review_policy_changed("new.json", "new.json"))
+        self.assertFalse(review_policy_changed(None, None))
+        self.assertFalse(review_policy_changed("", "  "))
 
     def test_two_sequential_appends_both_remain(self):
         first, created_first = append_decision(

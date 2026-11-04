@@ -31,6 +31,8 @@ from utils.review.decisions import (
     auto_display_rows,
     index_decisions,
     record_reviewer_decision,
+    review_policy_changed,
+    without_other_policy_autos,
 )
 from utils.review.history_lookup import (
     HISTORY_COLUMNS,
@@ -239,10 +241,19 @@ def _load_review_result(token: str) -> dict | None:
     return payload
 
 
-def _save_review_result(token: str, result: dict, reviewed_at: datetime) -> None:
-    """Keep the review in this session so a rerun can show the same queue."""
+def _save_review_result(
+    token: str,
+    result: dict,
+    reviewed_at: datetime,
+    policy_file: str | None,
+) -> None:
+    """Keep the review in this session so a rerun can show the same queue.
+
+    ``policy_file`` is the live file this queue was classified under.
+    """
     st.session_state["review_saved_result"] = {
         "token": token,
+        "policy_file": policy_file,
         "reviewed_at": reviewed_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "errors": result.get("errors") or [],
         "open": result.get("open") or [],
@@ -338,11 +349,14 @@ def _picked_index(state):
 
 st.title("Reviews")
 _live = read_live_policy()
-if _live is None:
+_live_file = _live["file"] if _live else None
+if _live_file:
+    st.caption(f"Policy: {_live_file}")
+else:
     st.write("No live policy. Every request goes to review.")
 
 _policy = _live["policy"] if _live else None
-st.session_state["review_policy_file"] = _live["file"] if _live else None
+st.session_state["review_policy_file"] = _live_file
 
 _stored = _load_stored_upload()
 _sample_error = None
@@ -391,38 +405,61 @@ if _sample_error:
 if _stored is not None:
     st.caption(f"File: {_stored['filename']}")
 
-if _review_clicked:
-    _reset_queue_selection(keep_checkup_cache=True)
-    # A new Review click writes the summary again. The previous comment is not reused.
-    st.session_state["review_summary_cache"] = {}
+def _run_review(stored: dict, *, drop_previous_auto: bool) -> None:
+    """Classify the stored file under the policy that is live right now."""
     with st.spinner("The agent is reviewing the requests"):
         try:
-            _fieldnames, _rows = read_upload(_stored["payload"])
+            fieldnames, rows = read_upload(stored["payload"])
         except UploadFormatError as error:
             st.error(str(error))
             st.stop()
-        _fresh = classify_upload(
-            _rows,
+        fresh = classify_upload(
+            rows,
             log_records=_decision_log(),
-            fieldnames=_fieldnames,
+            fieldnames=fieldnames,
             agent=_cached_checkup,
             summarizer=_cached_summary,
             history_rows=_read_history_rows(),
         )
-        _reviewed_at = datetime.now(timezone.utc)
-        _previous_rows = _load_sheet(_stored["token"])[1]
-        _logged_now = index_decisions(_decision_log())
-        _sheet_columns, _sheet_rows = build_review_sheet(
-            _rows,
-            fieldnames=_fieldnames,
-            auto=_fresh.get("auto") or [],
-            logged=_logged_now,
-            previous=_previous_rows,
-            reviewed_at=_reviewed_at,
+        reviewed_at = datetime.now(timezone.utc)
+        previous_rows = _load_sheet(stored["token"])[1]
+        if drop_previous_auto:
+            # The previous policy's automatic rows are not decisions under this file.
+            previous_rows = [
+                row for row in previous_rows
+                if str(row.get("decided_by") or "").strip() != "auto"
+            ]
+        logged_now = index_decisions(_decision_log())
+        sheet_columns, sheet_rows = build_review_sheet(
+            rows,
+            fieldnames=fieldnames,
+            auto=fresh.get("auto") or [],
+            logged=logged_now,
+            previous=previous_rows,
+            reviewed_at=reviewed_at,
         )
-        fill_blank_auto_notes(_sheet_rows, list(_logged_now.values()))
-        _save_sheet(_stored["token"], _sheet_columns, _sheet_rows)
-        _save_review_result(_stored["token"], _fresh, _reviewed_at)
+        fill_blank_auto_notes(sheet_rows, list(logged_now.values()))
+        _save_sheet(stored["token"], sheet_columns, sheet_rows)
+        _save_review_result(stored["token"], fresh, reviewed_at, _live_file)
+
+
+_saved_for_policy = _load_review_result(_stored["token"]) if _stored is not None else None
+_policy_changed = (
+    _saved_for_policy is not None
+    and review_policy_changed(_saved_for_policy.get("policy_file"), _live_file)
+)
+if _review_clicked or _policy_changed:
+    if _policy_changed:
+        st.session_state["review_decision_log"] = without_other_policy_autos(
+            _decision_log(),
+            _live_file,
+        )
+        _reset_queue_selection()
+    else:
+        _reset_queue_selection(keep_checkup_cache=True)
+    # A new review writes the summary again. The previous comment is not reused.
+    st.session_state["review_summary_cache"] = {}
+    _run_review(_stored, drop_previous_auto=_policy_changed)
 
 if _stored is None:
     st.stop()
