@@ -87,23 +87,29 @@ A repository-root `.env` (not committed) works if you leave the sidebar blank:
 
 ## Architecture
 
-Streamlit is the app. It has two pages, Reviews and Policy Management, and a sidebar for the provider, key, and model.
+Streamlit provides Reviews and Policy Management, with a sidebar for the model provider and key.
 
-The reviewer loads a pending CSV on Reviews with **Use pending.csv** or an upload. `data/raw/pending.csv` is the sample that button reads. `data/raw/history.csv` is read from disk. It is the past sample for the manager preview and for similar rows on a review.
+Reviews accepts the sample `data/raw/pending.csv` or another uploaded CSV. `data/raw/history.csv` supplies manager-preview data and reviewer context.
 
-`policies/` holds one JSON file per policy. `policies/live_pointer.json` names the live file. The evaluator reads that file and does not call the model. Policy Management can save a new file without moving the pointer. The picker writes the pointer after the history preview.
+`policies/` holds policy JSON files; `policies/live_pointer.json` identifies the live policy. The deterministic evaluator applies it. Managers can draft and preview a policy before explicitly making it live.
 
-The LLM is a separate component: OpenAI, Claude, or Gemini, chosen in the sidebar. Reviews call it for the checkup and for a comment on an open row. Policy Builder calls it to turn a manager's words into draft JSON. It does not approve a refund or make a policy live.
-
-The decision log stays in the Streamlit session. The CSV download is the copy you can keep.
+The LLM can draft reviewer context and policy JSON, or flag a policy match for human review; it cannot approve requests or activate policy. Decisions are simulated and kept in the Streamlit session.
 
 ```mermaid
 flowchart LR
-  upload[Pending CSV upload] --> app[Streamlit]
-  history[data/raw/history.csv] --> processing[Processing] --> app
-  policies[policies/] --> app
-  llm[LLM] --> app
+  files[Pending CSV + history.csv] --> app[Streamlit: Reviews + Policy Management]
+  policies[Policy JSON + live pointer] --> evaluator[Deterministic policy evaluator]
+  app --> evaluator
+  evaluator -->|Needs review| reviewer[Reviewer queue]
+  evaluator -->|Policy match| llm[LLM: checkup and drafting]
+  llm -->|May hold for review| reviewer
+  app -->|Draft, preview, activate| policies
+  llm -->|Clear match: Python records| decisions
+  reviewer --> decisions[Session decision log + CSV export]
+  app -.->|Reviewer context and policy drafting| llm
 ```
+
+All decisions are simulated, not payments.
 
 ## Workflow
 
@@ -152,8 +158,8 @@ flowchart TD
   pointer -.-> shown
 ```
 
-Unknown, malformed, duplicate, already-logged, and non-finite inputs go to a person.
+Unknown, malformed, duplicate, and non-finite inputs are never auto-approved. Invalid rows are reported, eligible rows remain for review, and already-logged requests are not decided again.
 
 ## AI coding tools
 
-I used a system of agents in Cursor. They wrote code, reviewed it, wrote tests, analyzed the data, and suggested business decisions. One thing they produced, and that I changed, was the auto-approve path. Their version approved a request as soon as a function matched the live policy. I still use that function for the policy decision, then give its result to the agent. It looks for anything else that makes the match unsafe, such as a contradiction in the notes or a duplicate request. The agent can approve that auto-approve, or refuse it and send the row to review. It cannot approve anything else.
+I used a system of agents in Cursor. They wrote code, reviewed it, wrote tests, analyzed the data, and suggested business decisions. One thing they produced, and that I changed, was the auto-approve path. Their version approved a request as soon as a function matched the live policy. I kept the deterministic policy evaluation and added a separate LLM checkup that can hold an existing match for review. A clear checkup does not itself approve anything: Python records the simulated auto-decision only after its checks succeed. The model cannot create a policy match, approve another request, or make a policy live.
