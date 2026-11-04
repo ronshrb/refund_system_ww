@@ -18,3 +18,5 @@ tasks/*
 plans/*
 docs/*
 eval-results/*
+
+.venv/
