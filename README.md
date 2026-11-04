@@ -9,6 +9,8 @@ A local Streamlit app that auto-handles refund rows the live policy already matc
 
 ## Run
 
+I recommend Python 3.13.
+
 From the repository root. Replace `your-key` with the provider key.
 
 Paste this once in PowerShell. It creates `.venv` when that interpreter is missing, installs `requirements.txt`, sets the key, runs the tests, then starts the app. Streamlit starts only if the install and the tests succeed. Open **Reviews** and click **Use pending.csv**, or upload `data/raw/pending.csv` or another CSV with the same columns.
