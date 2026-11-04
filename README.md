@@ -2,6 +2,11 @@
 
 A local Streamlit app that auto-handles refund rows the live policy already matches, and leaves the rest for a person.
 
+## Demo and write-up
+
+- [Screen recording of the demo](https://drive.google.com/file/d/1wUZLuc0g5NVZ4_FXkRlzNu9zEMpSAmNH/view?usp=sharing)
+- [Write-up (slides)](https://docs.google.com/presentation/d/16R5Mh4plqwG-gdEcKx40-x3m83gMouaK/edit?usp=sharing&ouid=116218804212255147197&rtpof=true&sd=true)
+
 ## Run
 
 From the repository root. Replace `your-key` with the provider key.
