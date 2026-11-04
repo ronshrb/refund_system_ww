@@ -34,6 +34,7 @@ from utils.review.queue import classify_upload
 _REPO = Path(__file__).resolve().parents[1]
 _PENDING = _REPO / "data" / "raw" / "pending.csv"
 _RAW_DIR = _REPO / "data" / "raw"
+_EVAL_POLICIES = _REPO / "tests" / "fixtures" / "review_agent_eval" / "policies"
 _AUTO_MONEY = {"SYN-CLEAN", "SYN-SMALL", "SYN-HISTORY"}
 
 
@@ -93,6 +94,7 @@ class ReviewAgentEvalTests(unittest.TestCase):
         return classify_upload(
             rows,
             log_path=self.log_path,
+            policies_dir=_EVAL_POLICIES,
             chat_model=model,
             history_rows=history if history is not None else [],
         )
@@ -287,15 +289,32 @@ class ReviewAgentEvalTests(unittest.TestCase):
     def test_live_report_prints_the_text_that_failed(self):
         result = {
             "auto": [],
-            "open": [{
-                "request_id": "SYN-CLEAN",
-                "reason": "review_note_hold",
-                "reviewer_comment": "The amount looks odd.",
-            }],
+            "open": [
+                {
+                    "request_id": "SYN-CLEAN",
+                    "reason": "review_note_hold",
+                    "reviewer_comment": "Refunds for home category should go to review.",
+                },
+                {
+                    "request_id": "SYN-HISTORY",
+                    "reason": "checkup_incomplete",
+                    "reviewer_comment": "The checkup reply was incomplete.",
+                },
+            ],
         }
         lines = report_lines(result)
-        self.assertIn("SYN-CLEAN fail: not auto-approved", lines)
-        self.assertIn("[review_note_hold]\nThe amount looks odd.", lines)
+        self.assertIn(
+            "SYN-CLEAN fail: false hold: matched request sent to review",
+            lines,
+        )
+        self.assertIn(
+            "SYN-HISTORY fail: checkup incomplete: matched request safely left open",
+            lines,
+        )
+        self.assertIn(
+            "[review_note_hold]\nRefunds for home category should go to review.",
+            lines,
+        )
         self.assertIn("rubric accuracy: 0/17 (0%)", lines)
         self.assertIn("money: 0/2", lines)
         self.assertIn("summary: 0/15", lines)
@@ -308,7 +327,7 @@ class ReviewAgentEvalTests(unittest.TestCase):
             "open": [{
                 "request_id": "SYN-CLEAN",
                 "reason": "review_note_hold",
-                "reviewer_comment": "The amount looks odd.",
+                "reviewer_comment": "Refunds for home category should go to review.",
             }],
         }
         path = Path(self.temp.name) / "review_agent_eval.xlsx"
@@ -339,10 +358,16 @@ class ReviewAgentEvalTests(unittest.TestCase):
         self.assertEqual(clean[1], "money")
         self.assertIn("Auto-approve", clean[2])
         self.assertEqual(clean[3], "never_arrived")
-        self.assertEqual(clean[11], "[review_note_hold]\nThe amount looks odd.")
+        self.assertEqual(
+            clean[11],
+            "[review_note_hold]\nRefunds for home category should go to review.",
+        )
         self.assertEqual(clean[12], "open")
         self.assertEqual(clean[13], "fail")
-        self.assertEqual(clean[14], "not auto-approved")
+        self.assertEqual(
+            clean[14],
+            "false hold: matched request sent to review",
+        )
         self.assertEqual(headers[-1], "Raw model reply")
         foreign = saved["SYN-FOREIGN-ORDER"]
         self.assertEqual(foreign[-1], '{"reviewer_comment": "Approve the refund."}')
@@ -352,6 +377,7 @@ class ReviewAgentEvalTests(unittest.TestCase):
         self.assertTrue(score["B1"].value.startswith("=COUNTIF("))
         self.assertIn("/COUNTA(", score["B1"].value)
         self.assertTrue(score["B2"].value.startswith("=COUNTIFS("))
+        self.assertIn("review_eval_policy.json", score["A5"].value)
         self.assertNotIn(str(path), "".join(str(item) for item in _RAW_DIR.iterdir()))
 
 

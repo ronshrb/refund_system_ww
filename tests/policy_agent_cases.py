@@ -7,10 +7,16 @@ golden sentence, and it does not activate a policy.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
+from numbers import Integral
 
 from utils.policy.policy_agent_utils import policy_confirmation_blockers
 
-_CLEAR_FIELDS = {"stated_reason", "days_since_delivery_lte", "amount_usd_lte"}
+_CLEAR_RULE = {
+    "stated_reason": "changed_mind",
+    "days_since_delivery_lte": 14,
+    "amount_usd_lte": 30,
+}
 
 
 def policy_cases() -> list[dict]:
@@ -99,7 +105,7 @@ def score_turn(case: Mapping, turn: Mapping) -> list[str]:
     if kind == "note":
         return ["an allow rule was added"] if allow else []
     if kind == "clear":
-        return _clear_failures(draft, allow, str(case.get("manager") or ""))
+        return _exact_allow_failures(draft, _CLEAR_RULE)
     if kind == "vague":
         return _vague_failures(draft, allow, str(case.get("manager") or ""))
     if kind == "live":
@@ -116,30 +122,77 @@ def score_turn(case: Mapping, turn: Mapping) -> list[str]:
     if kind == "reject":
         return _reject_failures(draft, allow)
     if kind == "split":
-        return _split_failures(draft, allow, str(case.get("manager") or ""))
+        return _exact_allow_failures(draft, _CLEAR_RULE)
     if kind == "reason_only":
-        return _reason_only_failures(draft, allow, str(case.get("manager") or ""))
+        return _exact_allow_failures(draft, {"stated_reason": "never_arrived"})
     return ["unknown case"]
 
 
-def _clear_failures(draft: Mapping, allow: list, manager: str) -> list[str]:
-    if not allow:
+def _exact_allow_failures(draft: Mapping, expected: Mapping) -> list[str]:
+    """Require one full-approval rule with exactly the manager's conditions."""
+    allow = draft.get("allow")
+    if not isinstance(allow, list) or not allow:
         return ["no draft rule"]
+    if any(not isinstance(rule, Mapping) for rule in allow):
+        return ["allow list contains a malformed rule"]
     failures = []
-    for blocker in _blockers(draft, manager):
-        failures.append(f"{blocker['kind']} was not stated")
-    for when in _whens(allow):
-        extra = sorted(set(when) - _CLEAR_FIELDS)
+    if len(allow) != 1:
+        failures.append("expected exactly one allow rule")
+    for index, rule in enumerate(allow, start=1):
+        prefix = f"rule {index}"
+        if rule.get("action") != "approve_full":
+            failures.append(f"{prefix} action is not approve_full")
+        groups = rule.get("all_of")
+        if not isinstance(groups, list) or not groups:
+            failures.append(f"{prefix} has no conditions")
+            continue
+        conditions = {}
+        duplicates = set()
+        for group in groups:
+            when = group.get("when") if isinstance(group, Mapping) else None
+            if not isinstance(when, Mapping) or not when:
+                failures.append(f"{prefix} has an invalid condition group")
+                continue
+            for field, value in when.items():
+                if field in conditions:
+                    duplicates.add(field)
+                conditions[field] = value
+        if duplicates:
+            failures.append(
+                f"{prefix} repeats conditions: " + ", ".join(sorted(duplicates))
+            )
+        missing = sorted(set(expected) - set(conditions))
+        if missing:
+            failures.append(
+                f"{prefix} is missing conditions: " + ", ".join(missing)
+            )
+        extra = sorted(set(conditions) - set(expected))
         if extra:
-            failures.append("condition not stated: " + ", ".join(extra))
-        reason = when.get("stated_reason")
-        if reason not in (None, "changed_mind"):
-            failures.append("reason is not changed mind")
-        if "days_since_delivery_lte" in when and _number(when["days_since_delivery_lte"]) != 14:
-            failures.append("days are not 14")
-        if "amount_usd_lte" in when and _number(when["amount_usd_lte"]) != 30:
-            failures.append("amount is not 30")
+            failures.append(
+                f"{prefix} has conditions not stated: " + ", ".join(extra)
+            )
+        for field in sorted(set(expected) & set(conditions)):
+            if not _same_condition_value(field, conditions[field], expected[field]):
+                failures.append(f"{prefix} has the wrong value for {field}")
     return failures
+
+
+def _same_condition_value(field: str, actual: object, expected: object) -> bool:
+    if field == "amount_usd_lte":
+        if isinstance(actual, bool) or not isinstance(actual, (int, float, Decimal)):
+            return False
+        try:
+            amount = Decimal(str(actual))
+        except (InvalidOperation, ValueError):
+            return False
+        return amount.is_finite() and amount == Decimal(str(expected))
+    if isinstance(expected, Integral):
+        return (
+            isinstance(actual, Integral)
+            and not isinstance(actual, bool)
+            and actual == expected
+        )
+    return actual == expected
 
 
 def _reject_failures(draft: Mapping, allow: list) -> list[str]:
@@ -148,38 +201,6 @@ def _reject_failures(draft: Mapping, allow: list) -> list[str]:
         failures.append("a refund rule was added")
     if _has_action(draft, "reject"):
         failures.append("a reject action was added")
-    return failures
-
-
-def _split_failures(draft: Mapping, allow: list, manager: str) -> list[str]:
-    """The changed-mind clause may be a rule. Damaged stays with a person."""
-    failures = []
-    changed = []
-    for when in _whens(allow):
-        reason = when.get("stated_reason")
-        if reason not in (None, "changed_mind"):
-            failures.append("the reviewer note became an allow rule")
-            continue
-        changed.append(when)
-    if not changed:
-        failures.append("no draft rule")
-        return failures
-    narrowed = {"allow": [{"all_of": [{"when": when}]} for when in changed]}
-    return failures + _clear_failures(narrowed, narrowed["allow"], manager)
-
-
-def _reason_only_failures(draft: Mapping, allow: list, manager: str) -> list[str]:
-    if not allow:
-        return ["no draft rule"]
-    failures = []
-    for blocker in _blockers(draft, manager):
-        failures.append(f"{blocker['kind']} was not stated")
-    for when in _whens(allow):
-        extra = sorted(set(when) - {"stated_reason"})
-        if extra:
-            failures.append("condition not stated: " + ", ".join(extra))
-        if when.get("stated_reason") not in (None, "never_arrived"):
-            failures.append("reason is not never arrived")
     return failures
 
 
@@ -221,13 +242,6 @@ def _whens(allow: list) -> list[dict]:
             if isinstance(when, dict) and when:
                 found.append(when)
     return found
-
-
-def _number(value: object) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _claims_activated(text: str) -> bool:

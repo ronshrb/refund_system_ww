@@ -1,0 +1,35 @@
+{
+  "version": "review-agent-eval-v1",
+  "status": "test",
+  "comment": "Synthetic evaluation fixture only. Not a live or approved refund policy.",
+  "allow": [
+    {
+      "id": "never_arrived_blank_fraud_clear",
+      "action": "approve_full",
+      "all_of": [
+        {
+          "when": {
+            "stated_reason": "never_arrived",
+            "customer_note_blank": true,
+            "support_note_blank": true,
+            "fraud_flag": "no"
+          }
+        }
+      ]
+    },
+    {
+      "id": "amount_lte_30_blank_fraud_clear",
+      "action": "approve_full",
+      "all_of": [
+        {
+          "when": {
+            "amount_usd_lte": 30,
+            "customer_note_blank": true,
+            "support_note_blank": true,
+            "fraud_flag": "no"
+          }
+        }
+      ]
+    }
+  ]
+}

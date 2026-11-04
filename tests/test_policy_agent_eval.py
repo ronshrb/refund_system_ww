@@ -90,6 +90,38 @@ class PolicyAgentEvalTests(unittest.TestCase):
         self.assertTrue(any("tenure" in item for item in failures))
         self.assertEqual(score_turn(case, _turn()), ["no draft rule"])
 
+    def test_clear_rule_requires_every_stated_condition_and_full_approval(self):
+        case = _case("clear")
+        for when in (
+            {"stated_reason": "changed_mind"},
+            {
+                "stated_reason": "changed_mind",
+                "days_since_delivery_lte": 14,
+            },
+        ):
+            with self.subTest(when=when):
+                turn = _turn(allow=[{
+                    "id": "changed_mind",
+                    "action": "approve_full",
+                    "all_of": [{"when": when}],
+                }])
+                self.assertTrue(score_turn(case, turn))
+
+        rejected = _turn(
+            allow=[{
+                "id": "changed_mind",
+                "action": "reject",
+                "all_of": [{
+                    "when": {
+                        "stated_reason": "changed_mind",
+                        "days_since_delivery_lte": 14,
+                        "amount_usd_lte": 30,
+                    },
+                }],
+            }],
+        )
+        self.assertIn("rule 1 action is not approve_full", score_turn(case, rejected))
+
     def test_vague_words_do_not_become_a_number(self):
         case = _case("vague")
         self.assertEqual(score_turn(case, _turn()), [])
@@ -179,7 +211,9 @@ class PolicyAgentEvalTests(unittest.TestCase):
                 "all_of": [{"when": {"stated_reason": "arrived_damaged"}}],
             },
         ], updated=True)
-        self.assertIn("the reviewer note became an allow rule", score_turn(case, both))
+        failures = score_turn(case, both)
+        self.assertIn("expected exactly one allow rule", failures)
+        self.assertIn("rule 2 has the wrong value for stated_reason", failures)
 
     def test_a_reason_only_rule_does_not_gain_a_cap(self):
         case = _case("reason_only")
@@ -198,6 +232,12 @@ class PolicyAgentEvalTests(unittest.TestCase):
         }], updated=True)
         failures = score_turn(case, capped)
         self.assertTrue(any("amount" in item for item in failures))
+        missing_reason = _turn(allow=[{
+            "id": "broad",
+            "action": "approve_full",
+            "all_of": [{"when": {"amount_usd_lte": 30}}],
+        }])
+        self.assertTrue(score_turn(case, missing_reason))
 
     def test_live_eval_skips_when_the_key_is_missing(self):
         self.assertIn("provider key is missing", skip_reason(configured=False))

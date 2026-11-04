@@ -16,6 +16,13 @@ from tests.review_agent_cases import history_slice, money_rows, phrase_failures,
 from utils.policy.llm_provider import llm_configured, make_chat_model
 from utils.review.queue import classify_upload
 
+_EVAL_POLICIES = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "review_agent_eval"
+    / "policies"
+)
+
 
 class _RecordingChatModel:
     """Forwards one live model and keeps each raw reply by request id.
@@ -178,7 +185,15 @@ def case_rows(result: dict, history_rows=None, raw_replies=None) -> list[dict]:
 
     for request_id, tested in _MONEY_TESTED.items():
         if request_id not in auto:
-            add(request_id, "money", tested, "auto-approve", "history; Pay this", "not auto-approved")
+            open_row = _open_row(result, request_id)
+            reason = open_row.get("reason")
+            if reason == "review_note_hold":
+                failed = "false hold: matched request sent to review"
+            elif reason == "checkup_incomplete":
+                failed = "checkup incomplete: matched request safely left open"
+            else:
+                failed = f"not auto-approved (reason: {reason or 'missing'})"
+            add(request_id, "money", tested, "auto-approve", "history; Pay this", failed)
             continue
         note = auto[request_id].get("outcome_note") or ""
         if "history" in note.casefold() or "Pay this" in note:
@@ -304,7 +319,9 @@ def write_eval_workbook(result: dict, path: Path, history_rows=None, raw_replies
     score["A5"] = (
         "A case passes only when every check for that row passed. "
         "Rows are the invented cases in tests/review_agent_cases.py, "
-        "scored by tests/eval_review_agent.py. They are not data/raw. "
+        "scored by tests/eval_review_agent.py under the fixed synthetic "
+        "policy tests/fixtures/review_agent_eval/policies/review_eval_policy.json. "
+        "They are not data/raw. "
         "The three scores are formulas over the Cases sheet."
     )
     for row in score.iter_rows(min_row=1, max_row=3, max_col=2):
@@ -334,12 +351,17 @@ def main(argv: list[str] | None = None) -> int:
         result = classify_upload(
             _live_rows(),
             log_path=Path(temp) / "review_decisions.json",
+            policies_dir=_EVAL_POLICIES,
             chat_model=model,
             history_rows=history_slice(),
         )
     lines = report_lines(result)
     for line in lines:
         print(line)
+    print(
+        "evaluation policy: "
+        "tests/fixtures/review_agent_eval/policies/review_eval_policy.json (synthetic)"
+    )
     saved = write_eval_workbook(
         result,
         eval_workbook_path(),
