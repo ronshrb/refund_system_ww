@@ -239,6 +239,67 @@ class PolicyAgentEvalTests(unittest.TestCase):
         }])
         self.assertTrue(score_turn(case, missing_reason))
 
+    def test_confirmation_turn_is_sent_only_when_the_agent_asks_first(self):
+        from unittest import mock
+
+        from tests import eval_policy_agent
+
+        case = _case("reason_only")
+        rule = [{"id": "r", "action": "approve_full", "all_of": [{"when": {"stated_reason": "never_arrived"}}]}]
+        asked = _turn(text="Is that correct?")
+        drafted = _turn(allow=rule, text="Drafted.", updated=True)
+        with mock.patch.object(
+            eval_policy_agent, "run_policy_agent_turn", side_effect=[asked, drafted]
+        ) as run:
+            turn, shown = eval_policy_agent.run_case(case, {}, object())
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.kwargs["user_text"], case["confirm"])
+        self.assertEqual(run.call_args.kwargs["history"][1]["content"], "Is that correct?")
+        self.assertEqual(score_turn(case, turn), [])
+        self.assertIn("Turn 1: Is that correct?", shown)
+        self.assertIn("Turn 2: Drafted.", shown)
+        with mock.patch.object(
+            eval_policy_agent, "run_policy_agent_turn", side_effect=[drafted]
+        ) as run:
+            eval_policy_agent.run_case(case, {}, object())
+        self.assertEqual(run.call_count, 1)
+        with mock.patch.object(
+            eval_policy_agent, "run_policy_agent_turn", side_effect=[asked]
+        ) as run:
+            eval_policy_agent.run_case(_case("vague"), {}, object())
+        self.assertEqual(run.call_count, 1)
+
+    def test_a_confirmation_that_still_drafts_nothing_still_fails(self):
+        case = _case("reason_only")
+        self.assertEqual(score_turn(case, _turn(text="Is that correct?")), ["no draft rule"])
+
+    def test_negative_cases_have_judge_criteria_and_labelled_replies(self):
+        for kind in ("vague", "live", "history", "partial", "reject"):
+            case = _case(kind)
+            with self.subTest(kind=kind):
+                self.assertTrue(case["convey"])
+                self.assertTrue(case["avoid"])
+                self.assertTrue(case["good"])
+                self.assertTrue(case["bad"])
+
+    def test_an_empty_draft_with_a_bad_reply_fails_the_judge(self):
+        from tests import eval_policy_agent
+        from tests.test_review_agent_eval import _Judge
+
+        case = _case("vague")
+        self.assertEqual(score_turn(case, _turn(text=case["bad"])), [])
+        failures, check = eval_policy_agent.judge_policy_reply(
+            case, case["bad"], _Judge(unmet={"C1"})
+        )
+        self.assertIn("not conveyed", failures[0])
+        self.assertIn("good_accepted", check)
+        row = eval_policy_agent._record(case, _turn(text=case["bad"]), None, failures)
+        self.assertEqual(row["result"], "fail")
+        ok, _ = eval_policy_agent.judge_policy_reply(case, case["good"], _Judge())
+        self.assertEqual(ok, [])
+        none, check = eval_policy_agent.judge_policy_reply(_case("clear"), "x", _Judge())
+        self.assertEqual((none, check), ([], None))
+
     def test_live_eval_skips_when_the_key_is_missing(self):
         self.assertIn("provider key is missing", skip_reason(configured=False))
         self.assertIsNone(skip_reason(configured=True))

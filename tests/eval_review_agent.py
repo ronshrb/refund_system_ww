@@ -18,6 +18,7 @@ from tests.review_agent_cases import (
     summary_cases,
 )
 from tests.summary_judge import calibrate, failed_checks, judge_summary
+from tests.summary_judge import calibration_line as _calibration_line
 from utils.policy.llm_provider import llm_configured, make_chat_model
 from utils.review.history_lookup import duplicate_history
 from utils.review.queue import classify_upload
@@ -254,10 +255,7 @@ def judge_results(result: dict, chat_model) -> tuple[dict, dict]:
 
 def calibration_line(calibration: dict | None) -> str | None:
     """Judge agreement with the hand labels, or None when it was not run."""
-    if not calibration:
-        return None
-    checks = [flag for item in calibration.values() for flag in item.values()]
-    return f"judge check: {sum(checks)}/{len(checks)} labelled replies agreed"
+    return _calibration_line(calibration)
 
 
 def report_lines(result: dict, judgments: dict | None = None, calibration: dict | None = None) -> list[str]:

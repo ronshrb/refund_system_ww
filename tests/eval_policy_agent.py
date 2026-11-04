@@ -1,7 +1,10 @@
 """Live policy-drafter eval. Runs when this module is started and a key is set.
 
 Does not write ``data/raw``, a policy file, or the live pointer. Each case
-starts from the empty template. A missing key skips the call.
+starts from the empty template. A case whose agent asks to confirm first gets
+one scripted "yes" turn. Replies to the negative cases are graded by the
+offline judge in ``tests/summary_judge.py``; the draft checks stay exact.
+A missing key skips the call.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from tests.policy_agent_cases import policy_cases, score_turn
+from tests.summary_judge import calibrate, calibration_line, failed_checks, judge_summary
 from utils.policy.llm_provider import llm_configured, make_chat_model
 from utils.policy.policy_agent import run_policy_agent_turn
 
@@ -47,23 +51,67 @@ def _snapshot(root: Path) -> dict[Path, bytes]:
     return {path: path.read_bytes() for path in root.iterdir() if path.is_file()}
 
 
-def _record(case: dict, turn: dict) -> dict:
-    failures = score_turn(case, turn)
+def _record(case: dict, turn: dict, assistant: str | None = None, judge_failures=None) -> dict:
+    failures = score_turn(case, turn) + list(judge_failures or [])
     allow = (turn.get("draft") or {}).get("allow") or []
     return {
         "id": case["id"],
         "tested": case["tested"],
         "manager": case["manager"],
-        "assistant": turn.get("assistant_text") or "",
+        "assistant": assistant if assistant is not None else (turn.get("assistant_text") or ""),
         "draft_updated": bool(turn.get("draft_updated")),
         "allow": json.dumps(allow, ensure_ascii=False),
         "result": "fail" if failures else "pass",
-        "failed": ", ".join(failures),
+        "failed": "; ".join(failures),
     }
 
 
-def report_lines(rows: list[dict]) -> list[str]:
-    """Pass or fail for each case, then rubric accuracy."""
+def run_case(case: dict, template: dict, model) -> tuple[dict, str]:
+    """Run one manager turn, plus the scripted confirmation when the agent asks first.
+
+    The agent may ask "is that correct?" before drafting. A case with a
+    ``confirm`` message then sends it as a second turn, as the manager would.
+    Returns the last turn and the text shown for the whole exchange.
+    """
+    first = run_policy_agent_turn(
+        user_text=case["manager"],
+        history=[],
+        current_draft=template,
+        chat_model=model,
+    )
+    first_text = first.get("assistant_text") or ""
+    confirm = case.get("confirm")
+    if not confirm or ((first.get("draft") or {}).get("allow")):
+        return first, first_text
+    second = run_policy_agent_turn(
+        user_text=confirm,
+        history=[
+            {"role": "user", "content": case["manager"]},
+            {"role": "assistant", "content": first_text},
+        ],
+        current_draft=first.get("draft") or template,
+        chat_model=model,
+    )
+    shown = (
+        f"Turn 1: {first_text}\n\nManager: {confirm}\n\n"
+        f"Turn 2: {second.get('assistant_text') or ''}"
+    )
+    return second, shown
+
+
+def judge_policy_reply(case: dict, text: str, judge_model) -> tuple[list[str], dict | None]:
+    """Judge failures for a case's reply, and the judge check on its labelled replies.
+
+    Only cases with criteria are judged. The draft checks stay exact.
+    """
+    if not case.get("convey"):
+        return [], None
+    verdicts = judge_summary(case, text, chat_model=judge_model)
+    return failed_checks(verdicts), calibrate(case, chat_model=judge_model)
+
+
+def report_lines(rows: list[dict], calibration: dict | None = None) -> list[str]:
+    """Pass or fail for each case, rubric accuracy, then the judge check."""
     lines = []
     for row in rows:
         if row["result"] == "pass":
@@ -76,10 +124,13 @@ def report_lines(rows: list[dict]) -> list[str]:
     total = len(rows)
     percent = round(100 * passed / total) if total else 0
     lines.append(f"rubric accuracy: {passed}/{total} ({percent}%)")
+    check = calibration_line(calibration)
+    if check:
+        lines.append(check)
     return lines
 
 
-def write_policy_workbook(rows: list[dict], path: Path) -> Path:
+def write_policy_workbook(rows: list[dict], path: Path, calibration: dict | None = None) -> Path:
     """One row per manager turn. The score is a formula over the result column."""
     workbook = Workbook()
     sheet = workbook.active
@@ -131,6 +182,24 @@ def write_policy_workbook(rows: list[dict], path: Path) -> Path:
     score.column_dimensions["A"].width = 22
     score.column_dimensions["B"].width = 14
     score.row_dimensions[3].height = 48
+    if calibration:
+        check = workbook.create_sheet("Judge check")
+        check.append(["Case id", "Judge accepted the good reply", "Judge rejected the bad reply"])
+        for cell in check[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+        for case_id, flags in calibration.items():
+            check.append([case_id, flags["good_accepted"], flags["bad_rejected"]])
+        total = check.max_row
+        check["E1"] = "Agreement with hand labels"
+        check["F1"] = (
+            f"=(COUNTIF(B2:B{total},TRUE)+COUNTIF(C2:C{total},TRUE))/(2*COUNTA(A2:A{total}))"
+        )
+        check["F1"].number_format = "0%"
+        check.column_dimensions["A"].width = 16
+        check.column_dimensions["B"].width = 30
+        check.column_dimensions["C"].width = 30
+        check.column_dimensions["E"].width = 30
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
     return path
@@ -153,18 +222,17 @@ def main(argv: list[str] | None = None) -> int:
     template = json.loads(_TEMPLATE.read_text(encoding="utf-8"))
     model = make_chat_model()
     rows = []
+    calibration = {}
     for case in policy_cases():
-        turn = run_policy_agent_turn(
-            user_text=case["manager"],
-            history=[],
-            current_draft=template,
-            chat_model=model,
-        )
-        rows.append(_record(case, turn))
-    lines = report_lines(rows)
+        turn, shown = run_case(case, template, model)
+        judge_failures, check = judge_policy_reply(case, turn.get("assistant_text") or "", model)
+        if check is not None:
+            calibration[case["id"]] = check
+        rows.append(_record(case, turn, shown, judge_failures))
+    lines = report_lines(rows, calibration)
     for line in lines:
         print(line)
-    saved = write_policy_workbook(rows, eval_workbook_path())
+    saved = write_policy_workbook(rows, eval_workbook_path(), calibration)
     print(f"saved {saved}")
     if _snapshot(_POLICIES) != before_policies or _snapshot(_RAW) != before_raw:
         print("fail: a policy file or data/raw changed")
