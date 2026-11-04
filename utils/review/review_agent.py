@@ -300,6 +300,14 @@ _INVENTED_WARNING = re.compile(
 )
 
 
+# A sentence that attributes the wording to the customer reports a claim, not a
+# warning the model invented, so it stays for the reviewer.
+_CUSTOMER_CLAIM = re.compile(
+    r"customer (?:claims|says|said|states|stated|wrote|reports|reported)",
+    re.IGNORECASE,
+)
+
+
 def _without_invented_warning(comment: str) -> str:
     """Drop a warning the model added when the customer note has no instruction.
 
@@ -309,7 +317,9 @@ def _without_invented_warning(comment: str) -> str:
     kept = []
     for sentence in re.split(r"\.(?:\"|')?\s+", comment.strip()):
         piece = sentence.strip()
-        if not piece or _INVENTED_WARNING.search(piece):
+        if not piece or (
+            _INVENTED_WARNING.search(piece) and not _CUSTOMER_CLAIM.search(piece)
+        ):
             continue
         if piece.count('"') % 2 == 1:
             piece += '"'
@@ -604,6 +614,14 @@ _INSTRUCTION_MARKERS = (
     "refund agent",
     "decision=approved",
     "ignore policy",
+    # The same orders in the languages the sample notes use.
+    "ignora la política",
+    "ignora la politica",
+    "aprueba el reembolso",
+    "no lo envíes",
+    "no lo envies",
+    "ignore la politique",
+    "approuvez le remboursement",
 )
 _NOTE_BRACKET = re.compile(r"\[(?P<body>[^\]]+)\]")
 

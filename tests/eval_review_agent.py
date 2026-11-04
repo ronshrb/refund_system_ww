@@ -12,7 +12,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from tests.review_agent_cases import history_slice, money_rows, phrase_failures, summary_cases
+from tests.review_agent_cases import (
+    history_slice,
+    money_rows,
+    summary_cases,
+)
+from tests.summary_judge import calibrate, failed_checks, judge_summary
 from utils.policy.llm_provider import llm_configured, make_chat_model
 from utils.review.history_lookup import duplicate_history
 from utils.review.queue import classify_upload
@@ -124,8 +129,8 @@ _COLUMNS = (
     "Customer note",
     "Support note",
     "History context",
-    "Required phrases",
-    "Forbidden phrases",
+    "Must convey",
+    "Must avoid",
     "Output",
     "Queue outcome",
     "Result",
@@ -158,13 +163,19 @@ def _intake_by_id() -> dict[str, dict]:
     return {row["request_id"]: row for row in _live_rows()}
 
 
-def case_rows(result: dict, history_rows=None, raw_replies=None) -> list[dict]:
-    """One scored record per live case. The same records feed the console and the workbook."""
+def case_rows(
+    result: dict,
+    history_rows=None,
+    raw_replies=None,
+    judgments: dict | None = None,
+) -> list[dict]:
+    """One scored record per live case. The same records feed the console and the workbook.
+
+    ``judgments`` maps a case id to the judge verdicts for the summary shown.
+    A summary case with no verdicts fails as not judged.
+    """
     auto = {row["request_id"]: row for row in result.get("auto") or []}
-    comments = {
-        row["request_id"]: row.get("reviewer_comment") or ""
-        for row in result.get("open") or []
-    }
+    judgments = judgments if isinstance(judgments, dict) else {}
     intakes = _intake_by_id()
     history_rows = history_slice() if history_rows is None else history_rows
     replies = raw_replies if isinstance(raw_replies, dict) else {}
@@ -183,8 +194,8 @@ def case_rows(result: dict, history_rows=None, raw_replies=None) -> list[dict]:
             "Customer note": intake.get("customer_note", ""),
             "Support note": intake.get("support_note", ""),
             "History context": _history_context(history_rows, intake),
-            "Required phrases": required,
-            "Forbidden phrases": forbidden,
+            "Must convey": required,
+            "Must avoid": forbidden,
             "Output": _shown_text(result, request_id),
             "Queue outcome": "auto" if paid else "open",
             "Result": "fail" if failed else "pass",
@@ -210,34 +221,53 @@ def case_rows(result: dict, history_rows=None, raw_replies=None) -> list[dict]:
             continue
         add(request_id, "money", tested, "auto-approve", "history; Pay this", "")
     for case in summary_cases():
-        tested = (
-            "Summary must contain: "
-            + ", ".join(case["must"])
-            + ". Must not contain: "
-            + ", ".join(case["must_not"])
-            + "."
-        )
-        required = ", ".join(case["must"])
-        forbidden = ", ".join(case["must_not"])
+        convey = "; ".join(case["convey"])
+        avoid = "; ".join(case["avoid"])
+        tested = f"Judge criteria. Convey: {convey} Avoid: {avoid}"
         if case["id"] in auto:
-            add(case["id"], "summary", tested, required, forbidden, "auto-approved")
+            add(case["id"], "summary", tested, convey, avoid, "auto-approved")
             continue
-        failures = phrase_failures(
-            comments.get(case["id"], ""),
-            must=case["must"],
-            must_not=case["must_not"],
-        )
-        add(case["id"], "summary", tested, required, forbidden, ", ".join(failures))
+        verdicts = judgments.get(case["id"])
+        if verdicts is None:
+            failures = ["not judged"]
+        else:
+            failures = failed_checks(verdicts)
+        add(case["id"], "summary", tested, convey, avoid, "; ".join(failures))
     return records
 
 
-def report_lines(result: dict) -> list[str]:
+def judge_results(result: dict, chat_model) -> tuple[dict, dict]:
+    """Judge every shown summary, then check the judge on the labelled replies.
+
+    Returns ``(judgments, calibration)``. A case that stayed out of the open
+    queue is not judged because the money check already failed it.
+    """
+    shown = {row["request_id"]: row.get("reviewer_comment") or "" for row in result.get("open") or []}
+    judgments = {}
+    calibration = {}
+    for case in summary_cases():
+        calibration[case["id"]] = calibrate(case, chat_model=chat_model)
+        if case["id"] in shown:
+            judgments[case["id"]] = judge_summary(case, shown[case["id"]], chat_model=chat_model)
+    return judgments, calibration
+
+
+def calibration_line(calibration: dict | None) -> str | None:
+    """Judge agreement with the hand labels, or None when it was not run."""
+    if not calibration:
+        return None
+    checks = [flag for item in calibration.values() for flag in item.values()]
+    return f"judge check: {sum(checks)}/{len(checks)} labelled replies agreed"
+
+
+def report_lines(result: dict, judgments: dict | None = None, calibration: dict | None = None) -> list[str]:
     """Pass or fail for each id, then rubric accuracy.
 
     A failure is followed by the text that was scored. The closing lines are
-    cases passed over cases scored, then the money and summary splits.
+    cases passed over cases scored, then the money and summary splits, then
+    how well the judge agreed with the hand labels.
     """
-    records = case_rows(result)
+    records = case_rows(result, judgments=judgments)
     lines = []
     for record in records:
         request_id = record["Request id"]
@@ -256,6 +286,9 @@ def report_lines(result: dict) -> list[str]:
     lines.append(f"rubric accuracy: {passed}/{total} ({percent}%)")
     lines.append(f"money: {money_pass}/{len(money)}")
     lines.append(f"summary: {summary_pass}/{len(summary)}")
+    check = calibration_line(calibration)
+    if check:
+        lines.append(check)
     return lines
 
 
@@ -264,13 +297,20 @@ def eval_workbook_path() -> Path:
     return Path(__file__).resolve().parents[1] / "eval-results" / "review_agent_eval.xlsx"
 
 
-def write_eval_workbook(result: dict, path: Path, history_rows=None, raw_replies=None) -> Path:
-    """Write one row per case and a score sheet whose totals are formulas."""
+def write_eval_workbook(
+    result: dict,
+    path: Path,
+    history_rows=None,
+    raw_replies=None,
+    judgments: dict | None = None,
+    calibration: dict | None = None,
+) -> Path:
+    """Write one row per case, a score sheet whose totals are formulas, and the judge check."""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
-    records = case_rows(result, history_rows, raw_replies)
+    records = case_rows(result, history_rows, raw_replies, judgments)
     workbook = Workbook()
     cases = workbook.active
     cases.title = "Cases"
@@ -343,6 +383,29 @@ def write_eval_workbook(result: dict, path: Path, history_rows=None, raw_replies
     score.column_dimensions["B"].width = 14
     score.row_dimensions[5].height = 48
 
+    if calibration:
+        check = workbook.create_sheet("Judge check")
+        check.append(["Request id", "Judge accepted the good reply", "Judge rejected the bad reply"])
+        for cell in check[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+        for request_id, flags in calibration.items():
+            check.append([request_id, flags["good_accepted"], flags["bad_rejected"]])
+        total = check.max_row
+        check["E1"] = "Agreement with hand labels"
+        check["F1"] = (
+            f'=(COUNTIF(B2:B{total},TRUE)+COUNTIF(C2:C{total},TRUE))/(2*COUNTA(A2:A{total}))'
+        )
+        check["F1"].number_format = "0%"
+        check["E2"] = (
+            "Each case has a hand-written good reply and a bad reply. The judge "
+            "is trusted only as far as it agrees with these labels."
+        )
+        check.column_dimensions["A"].width = 22
+        check.column_dimensions["B"].width = 30
+        check.column_dimensions["C"].width = 30
+        check.column_dimensions["E"].width = 30
+
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
     return path
@@ -364,7 +427,9 @@ def main(argv: list[str] | None = None) -> int:
             chat_model=model,
             history_rows=history_slice(),
         )
-    lines = report_lines(result)
+    judge_model = make_chat_model()
+    judgments, calibration = judge_results(result, judge_model)
+    lines = report_lines(result, judgments, calibration)
     for line in lines:
         print(line)
     print(
@@ -376,6 +441,8 @@ def main(argv: list[str] | None = None) -> int:
         eval_workbook_path(),
         history_slice(),
         model.replies,
+        judgments,
+        calibration,
     )
     print(f"saved {saved}")
     failed = any(line.startswith("SYN-") and " fail:" in line for line in lines)
