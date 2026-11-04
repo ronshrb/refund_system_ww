@@ -25,6 +25,7 @@ if str(_REPO_ROOT) not in sys.path:
 from utils.data.data_processing import normalize_reason
 from utils.data.dataloader import load_rows
 from utils.policy.live_policy import read_live_policy
+from utils.policy.llm_provider import key_is_accepted
 from utils.review.decisions import (
     auto_display_rows,
     index_decisions,
@@ -355,8 +356,12 @@ with st.container(horizontal=True, vertical_alignment="center"):
         if _stored is None or _stored["token"] != _token:
             _stored = _save_upload(_upload.name, _payload)
             _reset_queue_selection()
-    _review_clicked = st.button("Review", disabled=_stored is None)
-    st.markdown("Upload a pending CSV, then click Review.")
+    _key_ready = key_is_accepted(st.session_state)
+    _review_clicked = st.button("Review", disabled=_stored is None or not _key_ready)
+    if _key_ready:
+        st.markdown("Upload a pending CSV, then click Review.")
+    else:
+        st.markdown("Apply the API key in the sidebar, then upload a file and click Review.")
 
 if _stored is not None:
     st.caption(f"File: {_stored['filename']}")

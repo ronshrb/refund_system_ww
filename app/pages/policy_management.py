@@ -21,6 +21,7 @@ from decimal import Decimal
 
 from utils.data.dataloader import load_rows
 from utils.policy import policy_agent
+from utils.policy.llm_provider import key_is_accepted
 
 from utils.policy.live_policy import (
     history_evaluation_csv,
@@ -482,6 +483,10 @@ def _render_policy_picker() -> None:
                 format_func=lambda name: _policy_choice_label(files, name),
                 key="policy_picker_compare",
             )
+            if compare_with not in (_NO_COMPARE, _WITHOUT_POLICY):
+                compared, _compared_error = _load_candidate(compare_with)
+                if compared is not None:
+                    st.markdown(_markdown_safe(_stored_summary_text(compared)))
         if selected and make_clicked and not already_live:
             try:
                 make_live(selected)
@@ -558,9 +563,12 @@ def _render_policy_builder() -> None:
     st.session_state.setdefault(_SESSION_PROPOSAL_KEY, None)
     st.session_state.setdefault(_SESSION_NAME_STEP_KEY, False)
     st.session_state.setdefault(_SESSION_BLOCKER_KEY, None)
+    _key_ready = key_is_accepted(st.session_state)
 
     if not policy_agent.llm_configured():
         st.info(policy_agent.offline_message())
+    elif not _key_ready:
+        st.info("Apply the API key in the sidebar before using this chat.")
 
     preview = st.session_state.get(_SESSION_PREVIEW_KEY)
     if preview:
@@ -576,10 +584,13 @@ def _render_policy_builder() -> None:
             else:
                 _render_user_text(message["content"])
 
-    pending_text = st.session_state.pop(_SESSION_PENDING_KEY, None)
-    if pending_text:
+    pending_text = st.session_state.get(_SESSION_PENDING_KEY)
+    if pending_text and _key_ready:
+        st.session_state[_SESSION_PENDING_KEY] = None
         _run_manager_turn(pending_text)
         st.rerun()
+    elif pending_text:
+        st.session_state[_SESSION_PENDING_KEY] = None
 
     notice = st.session_state.pop(_SESSION_NOTICE_KEY, None)
     if notice:
@@ -625,7 +636,7 @@ def _render_policy_builder() -> None:
             if blocker
             else _pending_clarify_kind(messages, st.session_state[_SESSION_CONFIRMED_KEY])
         )
-        if clarify_kind and policy_agent.llm_configured() and st.session_state[_SESSION_PROPOSAL_KEY] is None:
+        if clarify_kind and _key_ready and policy_agent.llm_configured() and st.session_state[_SESSION_PROPOSAL_KEY] is None:
             st.subheader("Quick pick")
             if blocker:
                 st.info(blocker["detail"])
@@ -659,7 +670,7 @@ def _render_policy_builder() -> None:
                 if st.button("Use custom", key=f"clarify_custom_btn_{clarify_kind}"):
                     _confirm_pick(clarify_kind, int(custom))
 
-    prompt = st.chat_input("Describe a policy change…")
+    prompt = st.chat_input("Describe a policy change…", disabled=not _key_ready)
     if prompt:
         _queue_turn(prompt)
 

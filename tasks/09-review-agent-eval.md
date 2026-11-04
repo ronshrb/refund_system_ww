@@ -83,7 +83,7 @@ One scripted test still runs `data/raw/pending.csv`. With `hold` false and an em
 - Rewriting `pending.csv` or `history.csv`, or saving the invented rows there.
 - An exact golden paragraph. The model will not repeat one wording.
 - Scoring the pending file row by row, or treating history decisions as the right answers.
-- More shapes than the tables above. This list is the ceiling.
+- More shapes than the tables above, plus the later rows SYN-FRAUD-ORDER, SYN-AMOUNT, SYN-BLANK, and SYN-SUPPORT-FR.
 
 ## Acceptance checks
 
@@ -123,4 +123,4 @@ Three harness changes were required for the rubric, in `utils/review/review_agen
 
 ## Remaining limitations
 
-A live score changes when the model or the prompt changes. Phrase checks miss a paraphrase that still obeys a planted instruction. They do not measure reviewer time. The invented rows are the traps we thought of, not production traffic. SYN-FOREIGN-ORDER is not caught by the English marker list. The live score is the check for that, and it has not been run.
+A live score changes when the model or the prompt changes. Phrase checks miss a paraphrase that still obeys a planted instruction. They do not measure reviewer time. The invented rows are the traps we thought of, not production traffic. SYN-FOREIGN-ORDER is not caught by the English marker list. The live score is the check for that. A later change, not tied to those phrases: the summary must use a present note and must not retell the reason code as a customer claim; other rows in the upload are labeled as this file; a discarded model reply is kept in the workbook; an instruction quote is the order, not an earlier factual sentence. The live score has not been run again since that change.

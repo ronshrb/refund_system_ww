@@ -168,11 +168,16 @@ class LivePolicyTests(unittest.TestCase):
                 "text": "Carrier signature is not an auto-approve rule.",
             }],
         }
-        rule_sentence = explain_rule(policy["allow"][0])
         text = summarize_policy(policy)
         self.assertEqual(
             text,
-            "A full refund is auto-approved when any of these is true. " + rule_sentence,
+            "A full refund is auto-approved when any of these is true:\n"
+            "\n"
+            "- The customer changed their mind, it was delivered within 14 days, "
+            "the refund amount is $49 or less, the customer has had an account for "
+            "at least 3 months, there is no fraud flag, the customer is identified, "
+            "there is no customer note, there is no support note, and this request "
+            "was not already refunded.",
         )
         for operator in (
             "stated_reason",
@@ -484,6 +489,9 @@ class LivePolicyTests(unittest.TestCase):
         self.assertIn("channel_success(", source)
         self.assertIn("Evaluated on history", source)
         self.assertIn("Download data", source)
+        self.assertEqual(
+            source.count("st.markdown(_markdown_safe(_stored_summary_text("), 2
+        )
         self.assertIn(
             "Compared with auto approved requests from history data", source
         )

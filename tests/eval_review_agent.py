@@ -7,6 +7,7 @@ rows are written to ``eval-results/review_agent_eval.xlsx``.
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -14,6 +15,49 @@ from pathlib import Path
 from tests.review_agent_cases import history_slice, money_rows, phrase_failures, summary_cases
 from utils.policy.llm_provider import llm_configured, make_chat_model
 from utils.review.queue import classify_upload
+
+
+class _RecordingChatModel:
+    """Forwards one live model and keeps each raw reply by request id.
+
+    The shown summary can be the local sentence after a reply is discarded.
+    The workbook keeps the reply that was thrown away.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.replies: dict[str, str] = {}
+
+    def invoke(self, messages, *args, **kwargs):
+        reply = self.inner.invoke(messages, *args, **kwargs)
+        request_id = _request_id_from_messages(messages)
+        text = _reply_text(reply)
+        if request_id:
+            previous = self.replies.get(request_id, "")
+            self.replies[request_id] = f"{previous}\n{text}".strip() if previous else text
+        return reply
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def _request_id_from_messages(messages) -> str:
+    """The case id. It is the first request id in the payload, before history."""
+    for message in messages or []:
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            continue
+        match = re.search(r'"request_id":\s*"([^"]*)"', content)
+        if match and match.group(1):
+            return match.group(1)
+    return ""
+
+
+def _reply_text(reply) -> str:
+    content = getattr(reply, "content", reply)
+    if isinstance(content, str):
+        return content.strip()
+    return str(content).strip()
 
 
 def skip_reason(*, configured: bool | None = None) -> str | None:
@@ -78,6 +122,7 @@ _COLUMNS = (
     "Queue outcome",
     "Result",
     "Failed checks",
+    "Raw model reply",
 )
 
 
@@ -97,7 +142,7 @@ def _intake_by_id() -> dict[str, dict]:
     return {row["request_id"]: row for row in _live_rows()}
 
 
-def case_rows(result: dict, history_rows=None) -> list[dict]:
+def case_rows(result: dict, history_rows=None, raw_replies=None) -> list[dict]:
     """One scored record per live case. The same records feed the console and the workbook."""
     auto = {row["request_id"]: row for row in result.get("auto") or []}
     comments = {
@@ -106,6 +151,7 @@ def case_rows(result: dict, history_rows=None) -> list[dict]:
     }
     intakes = _intake_by_id()
     history = _history_context(history_slice() if history_rows is None else history_rows)
+    replies = raw_replies if isinstance(raw_replies, dict) else {}
     records = []
 
     def add(request_id: str, group: str, tested: str, required: str, forbidden: str, failed: str) -> None:
@@ -127,6 +173,7 @@ def case_rows(result: dict, history_rows=None) -> list[dict]:
             "Queue outcome": "auto" if paid else "open",
             "Result": "fail" if failed else "pass",
             "Failed checks": failed,
+            "Raw model reply": replies.get(request_id, ""),
         })
 
     for request_id, tested in _MONEY_TESTED.items():
@@ -193,13 +240,13 @@ def eval_workbook_path() -> Path:
     return Path(__file__).resolve().parents[1] / "eval-results" / "review_agent_eval.xlsx"
 
 
-def write_eval_workbook(result: dict, path: Path, history_rows=None) -> Path:
+def write_eval_workbook(result: dict, path: Path, history_rows=None, raw_replies=None) -> Path:
     """Write one row per case and a score sheet whose totals are formulas."""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
-    records = case_rows(result, history_rows)
+    records = case_rows(result, history_rows, raw_replies)
     workbook = Workbook()
     cases = workbook.active
     cases.title = "Cases"
@@ -226,7 +273,7 @@ def write_eval_workbook(result: dict, path: Path, history_rows=None) -> Path:
     widths = {
         "A": 20, "B": 12, "C": 56, "D": 16, "E": 12, "F": 12,
         "G": 42, "H": 42, "I": 42, "J": 36, "K": 36, "L": 56,
-        "M": 16, "N": 12, "O": 42,
+        "M": 16, "N": 12, "O": 42, "P": 56,
     }
     for letter, width in widths.items():
         cases.column_dimensions[letter].width = width
@@ -282,17 +329,23 @@ def main(argv: list[str] | None = None) -> int:
     if reason:
         print(reason)
         return 0
+    model = _RecordingChatModel(make_chat_model())
     with tempfile.TemporaryDirectory() as temp:
         result = classify_upload(
             _live_rows(),
             log_path=Path(temp) / "review_decisions.json",
-            chat_model=make_chat_model(),
+            chat_model=model,
             history_rows=history_slice(),
         )
     lines = report_lines(result)
     for line in lines:
         print(line)
-    saved = write_eval_workbook(result, eval_workbook_path(), history_slice())
+    saved = write_eval_workbook(
+        result,
+        eval_workbook_path(),
+        history_slice(),
+        model.replies,
+    )
     print(f"saved {saved}")
     failed = any(line.startswith("SYN-") and " fail:" in line for line in lines)
     return 1 if failed else 0

@@ -233,17 +233,90 @@ def explain_rule(rule) -> str:
 
 
 def summarize_policy(policy) -> str:
-    """One paragraph of the allow rules, in the same words as ``explain_rule``.
+    """Manager-facing summary of the allow rules, one bullet per rule.
 
-    Describes only allow rules. Review notes are not payment rules and are
-    not mentioned. Operator keys are not included. An empty or missing allow
-    list says that no rule auto-approves and a person decides.
+    Same conditions as ``explain_rule``, written as the drafting chat is
+    asked to summarize a policy: a short lead-in, then one plain-language
+    bullet per auto-approve rule. Review notes are not payment rules and
+    are not mentioned. Operator keys are not included. An empty or missing
+    allow list says that no rule auto-approves and a person decides.
     """
     allow = policy.get("allow") if isinstance(policy, Mapping) else None
     if not isinstance(allow, list) or not allow:
         return "No rule auto-approves a refund, so a person decides."
-    cases = " ".join(explain_rule(rule) for rule in allow)
-    return f"A full refund is auto-approved when any of these is true. {cases}"
+    bullets = "\n".join(f"- {_summary_sentence(rule)}" for rule in allow)
+    return "A full refund is auto-approved when any of these is true:\n\n" + bullets
+
+
+def _summary_sentence(rule) -> str:
+    """One auto-approve rule as a sentence a manager can read."""
+    clauses = [_summary_clause(operator, expected) for operator, expected in _conditions(rule)]
+    if not clauses:
+        return "No auto-approve conditions."
+    if len(clauses) == 1:
+        body = clauses[0]
+    else:
+        body = ", ".join(clauses[:-1]) + ", and " + clauses[-1]
+    return body[0].upper() + body[1:] + "."
+
+
+def _summary_clause(operator, expected) -> str:
+    """One condition in the same words the drafting chat would use.
+
+    Unknown operators stay "an extra condition" and the operator key is
+    never included.
+    """
+    if operator == "stated_reason":
+        phrases = {
+            "changed_mind": "the customer changed their mind",
+            "wrong_size": "the customer received the wrong size",
+            "arrived_damaged": "the order arrived damaged",
+            "wrong_item": "the customer received the wrong item",
+            "never_arrived": "the order never arrived",
+            "late_delivery": "the delivery was late",
+        }
+        if isinstance(expected, str):
+            return phrases.get(expected, "an extra condition")
+        return "an extra condition"
+    if operator == "days_since_delivery_lte":
+        number = _whole_number(expected)
+        if number is None:
+            return "an extra condition"
+        unit = "day" if number == 1 else "days"
+        return f"it was delivered within {number} {unit}"
+    if operator == "days_since_delivery_gte":
+        number = _whole_number(expected)
+        if number is None:
+            return "an extra condition"
+        unit = "day" if number == 1 else "days"
+        return f"it was delivered at least {number} {unit} ago"
+    if operator == "amount_usd_lte":
+        money = _money(expected)
+        if money is None:
+            return "an extra condition"
+        return f"the refund amount is {money} or less"
+    if operator == "amount_usd_gt":
+        money = _money(expected)
+        if money is None:
+            return "an extra condition"
+        return f"the refund amount is over {money}"
+    if operator == "tenure_months_gte":
+        number = _whole_number(expected)
+        if number is None:
+            return "an extra condition"
+        unit = "month" if number == 1 else "months"
+        return f"the customer has had an account for at least {number} {unit}"
+    if operator == "fraud_flag":
+        return "there is no fraud flag"
+    if operator == "customer_id_present":
+        return "the customer is identified"
+    if operator == "customer_note_blank":
+        return "there is no customer note"
+    if operator == "support_note_blank":
+        return "there is no support note"
+    if operator == "request_id_not_already_paid":
+        return "this request was not already refunded"
+    return "an extra condition"
 
 
 def history_outcome_rates(policy, request_rows) -> dict[str, int | float | Decimal | None]:

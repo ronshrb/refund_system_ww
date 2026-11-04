@@ -2,7 +2,7 @@
   "version": 1,
   "status": "draft",
   "comment": "",
-  "summary": "A full refund is auto-approved when any of these is true. Amount $30 or less. Changed mind, delivered within 14 days. Arrived damaged, amount over $50. Never arrived.",
+  "summary": "A full refund is auto-approved when any of these is true:\n\n- The refund amount is $30 or less.\n- The customer changed their mind, and it was delivered within 14 days.\n- The order arrived damaged, and the refund amount is over $50.\n- The order never arrived.",
   "allow": [
     {
       "id": "small_stuff_30",
