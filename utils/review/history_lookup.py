@@ -9,8 +9,9 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from datetime import datetime
+from decimal import Decimal
 
-from utils.data.data_processing import normalize_reason
+from utils.data.data_processing import normalize_reason, parse_amount
 
 # Same three shapes data_processing accepts. Time is kept when the value has it.
 _DATE_FORMATS = (
@@ -113,6 +114,64 @@ def request_history(
         limit=limit,
         include=lambda row: _cell(row, "request_id") == selected,
     )
+
+
+def duplicate_history(
+    rows,
+    *,
+    request_id: str,
+    customer_id: str,
+    amount_usd,
+    category: str,
+    limit: int = DEFAULT_LIMIT,
+) -> list[dict]:
+    """Return history matching this request id or customer/amount/category."""
+    if limit < 1:
+        return []
+    selected_id = request_id.strip() if isinstance(request_id, str) else ""
+    selected_key = refund_combination_key({
+        "customer_id": customer_id,
+        "amount_usd": amount_usd,
+        "category": category,
+    })
+    try:
+        materialized = list(rows)
+    except TypeError:
+        return []
+    matched = []
+    for row in materialized:
+        if not isinstance(row, Mapping):
+            continue
+        same_id = bool(selected_id) and _cell(row, "request_id") == selected_id
+        same_combination = (
+            selected_key is not None
+            and refund_combination_key(row) == selected_key
+        )
+        if same_id or same_combination:
+            matched.append((row, same_id))
+    matched.sort(key=lambda item: _sort_key(item[0]))
+    duplicates = []
+    for row, same_id in matched[:limit]:
+        context = _context_row(row)
+        context["category"] = _cell(row, "category")
+        context["match_type"] = (
+            "request_id" if same_id else "customer_amount_category"
+        )
+        duplicates.append(context)
+    return duplicates
+
+
+def refund_combination_key(row: Mapping) -> tuple[str, str, str] | None:
+    """Canonical customer/amount/category key used to identify repeats."""
+    customer = _cell(row, "customer_id")
+    category = _cell(row, "category")
+    amount = parse_amount(row.get("amount_usd"))
+    if not customer or not category or amount is None:
+        return None
+    cents = amount.quantize(Decimal("0.01"))
+    if amount != cents:
+        return None
+    return customer, format(cents, "f"), category.casefold()
 
 
 def _select_history(rows, *, limit: int, include) -> list[dict]:

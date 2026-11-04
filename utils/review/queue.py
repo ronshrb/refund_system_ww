@@ -30,6 +30,7 @@ from utils.review.decisions import (
     paid_ids_in,
     record_auto_approval,
 )
+from utils.review.history_lookup import duplicate_history, refund_combination_key
 from utils.review.review_agent import (
     CHECKUP_INCOMPLETE_COMMENT,
     build_checkup_payload,
@@ -251,7 +252,7 @@ def classify_upload(
         history = []
     # Policy labels are computed in Python before any model call. A label is
     # not an approval. Duplicates and already-logged ids are not evaluated.
-    evaluated, labels = _policy_labels(
+    evaluated = _evaluate_upload_rows(
         order,
         first_row,
         counts,
@@ -287,9 +288,16 @@ def classify_upload(
             continue
         result = evaluated[identity]
         matched = _is_policy_match(result)
+        history_duplicates = duplicate_history(
+            history,
+            request_id=identity,
+            customer_id=intake.get("customer_id", ""),
+            amount_usd=intake.get("amount_usd", ""),
+            category=intake.get("category", ""),
+        )
         # Same customer, amount, and category stays with a person even when
         # the policy matches. The summary cannot pay.
-        if identity in repeats:
+        if identity in repeats or history_duplicates:
             reason = "possible_repeat" if matched else _reason_text(result)
             open_rows.append(_open_row(
                 identity,
@@ -333,7 +341,6 @@ def classify_upload(
             policy_result=result,
             policy=policy if isinstance(policy, Mapping) else None,
             rule_sentence=_explain_matched_rule(policy, result.get("matched_rule")),
-            other_rows=_other_upload_rows(materialized, identity, labels),
             history_rows=history,
         )
         checked = _run_checkup(identity, payload, chat_model=chat_model, agent=agent)
@@ -671,19 +678,7 @@ def _request_identity(value: object) -> str:
 
 
 def _combination_key(row: Mapping) -> tuple[str, str, str] | None:
-    customer = row.get("customer_id")
-    category = row.get("category")
-    if not isinstance(customer, str) or not customer.strip():
-        return None
-    if not isinstance(category, str) or not category.strip():
-        return None
-    amount = parse_amount(row.get("amount_usd"))
-    if amount is None:
-        return None
-    cents = amount.quantize(Decimal("0.01"))
-    if amount != cents:
-        return None
-    return (customer.strip(), format(cents, "f"), category.strip().casefold())
+    return refund_combination_key(row)
 
 
 def _logged_status(record: object) -> str:
@@ -780,48 +775,15 @@ def _evaluate_intake(intake: Mapping, paid, policies_dir: Path | None) -> dict:
     }
 
 
-def _policy_labels(order, first_row, counts, logged, paid, policies_dir):
-    """Evaluate each eligible id once. The returned label cannot pay a row."""
+def _evaluate_upload_rows(order, first_row, counts, logged, paid, policies_dir):
+    """Evaluate each eligible id once; duplicate ids and logged rows stay out."""
     evaluated: dict[str, Mapping] = {}
-    labels: dict[str, str] = {}
     for identity in order:
-        if identity in logged:
-            labels[identity] = "already_decided"
-            continue
-        if counts[identity] > 1:
-            labels[identity] = "duplicate_request_id"
+        if identity in logged or counts[identity] > 1:
             continue
         result = _evaluate_intake(project_intake(first_row[identity]), paid, policies_dir)
         evaluated[identity] = result
-        if _is_policy_match(result):
-            labels[identity] = "matched_allow_rule"
-        else:
-            labels[identity] = _reason_text(result) or "invalid_request"
-    return evaluated, labels
-
-
-def _other_upload_rows(rows, current_id: str, labels: dict[str, str]) -> list[dict]:
-    """Other upload rows, without their customer or support note text."""
-    others = []
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        raw_id = row.get("request_id")
-        identity = raw_id.strip() if isinstance(raw_id, str) else ""
-        if identity == current_id:
-            continue
-        if identity:
-            classification = labels.get(identity, "invalid_request")
-        else:
-            classification = "blank_request_id"
-        others.append({
-            "request_id": identity,
-            "customer_id": row.get("customer_id") if isinstance(row.get("customer_id"), str) else "",
-            "amount": row.get("amount_usd") if isinstance(row.get("amount_usd"), str) else "",
-            "stated_reason": row.get("stated_reason") if isinstance(row.get("stated_reason"), str) else "",
-            "classification": classification,
-        })
-    return others
+    return evaluated
 
 
 def _is_policy_match(result: Mapping) -> bool:

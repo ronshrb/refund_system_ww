@@ -14,6 +14,7 @@ from pathlib import Path
 
 from tests.review_agent_cases import history_slice, money_rows, phrase_failures, summary_cases
 from utils.policy.llm_provider import llm_configured, make_chat_model
+from utils.review.history_lookup import duplicate_history
 from utils.review.queue import classify_upload
 
 _EVAL_POLICIES = (
@@ -108,8 +109,8 @@ _MONEY_TESTED = {
         "The stored reason is the rule sentence, not history and not a pay instruction."
     ),
     "SYN-HISTORY": (
-        "Auto-approve that same clean match when the checkup is shown two similar "
-        "approvals and one later reversal. The payment reason must not cite that history."
+        "Auto-approve a clean match when the supplied history contains only "
+        "same-reason or same-customer records with a different duplicate key."
     ),
 }
 
@@ -133,14 +134,22 @@ _COLUMNS = (
 )
 
 
-def _history_context(rows) -> str:
-    """The history slice handed to this run. Observed, not ground truth."""
-    if not rows:
-        return ""
+def _history_context(rows, intake) -> str:
+    """Describe only exact duplicate history supplied for this request."""
+    duplicates = duplicate_history(
+        rows,
+        request_id=intake.get("request_id", ""),
+        customer_id=intake.get("customer_id", ""),
+        amount_usd=intake.get("amount_usd", ""),
+        category=intake.get("category", ""),
+    )
+    if not duplicates:
+        return "No matching request-id or customer/amount/category history."
     parts = []
-    for row in rows:
+    for row in duplicates:
         parts.append(
-            f"{row.get('request_id')} {row.get('decision')} ({row.get('outcome_note')})"
+            f"{row.get('request_id')} {row.get('decision')} "
+            f"({row.get('match_type')}; {row.get('outcome_note')})"
         )
     return "; ".join(parts) + ". Observed past decisions, not ground truth."
 
@@ -157,7 +166,7 @@ def case_rows(result: dict, history_rows=None, raw_replies=None) -> list[dict]:
         for row in result.get("open") or []
     }
     intakes = _intake_by_id()
-    history = _history_context(history_slice() if history_rows is None else history_rows)
+    history_rows = history_slice() if history_rows is None else history_rows
     replies = raw_replies if isinstance(raw_replies, dict) else {}
     records = []
 
@@ -173,7 +182,7 @@ def case_rows(result: dict, history_rows=None, raw_replies=None) -> list[dict]:
             "Fraud flag": intake.get("fraud_flag", ""),
             "Customer note": intake.get("customer_note", ""),
             "Support note": intake.get("support_note", ""),
-            "History context": history,
+            "History context": _history_context(history_rows, intake),
             "Required phrases": required,
             "Forbidden phrases": forbidden,
             "Output": _shown_text(result, request_id),

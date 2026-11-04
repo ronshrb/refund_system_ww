@@ -940,6 +940,55 @@ class ReviewQueueTests(unittest.TestCase):
         )
         self.assertEqual((kept, kept_index), ("RF-1", 1))
 
+    def test_historical_id_or_combination_duplicate_stays_open(self):
+        self._write_policy(self.policies, "small.json", _MATCHING_POLICY)
+        make_live("small.json", policies_dir=self.policies)
+        rows = [
+            _matching("RF-HIST-ID", customer_id="CU-ID"),
+            _matching("RF-HIST-COMBO"),
+        ]
+        history_rows = [
+            {
+                "request_id": "RF-HIST-ID",
+                "customer_id": "CU-OTHER",
+                "amount_usd": "100.00",
+                "category": "home",
+                "decision": "approved",
+            },
+            {
+                "request_id": "H-COMBO",
+                "customer_id": "CU-1",
+                "amount_usd": "$40.00",
+                "category": "Apparel",
+                "decision": "reversed",
+            },
+        ]
+        model = _ReviewChatModel(checkup=True, hold=False)
+        result = classify_upload(
+            rows,
+            log_path=self.log_path,
+            policies_dir=self.policies,
+            clock=_clock,
+            chat_model=model,
+            history_rows=history_rows,
+        )
+        self.assertEqual(result["auto"], [])
+        self.assertEqual(_ids(result["open"]), ["RF-HIST-ID", "RF-HIST-COMBO"])
+        self.assertEqual(
+            {row["request_id"]: row["reason"] for row in result["open"]},
+            {
+                "RF-HIST-ID": "possible_repeat",
+                "RF-HIST-COMBO": "possible_repeat",
+            },
+        )
+        checkup_prompts = [
+            _messages_text(messages)
+            for messages in model.invocations
+            if "The live policy already classified this request" in _messages_text(messages)
+        ]
+        self.assertEqual(checkup_prompts, [])
+        self.assertFalse(self.log_path.exists())
+
     def test_model_confirm_cannot_override_the_note_rail(self):
         policy = dict(_MATCHING_POLICY)
         policy["review_notes"] = [
@@ -1289,8 +1338,8 @@ class ReviewQueueTests(unittest.TestCase):
         make_live("small.json", policies_dir=self.policies)
         history_rows = [
             {
-                "request_id": "RF-CLEAR",
-                "customer_id": "CU-1",
+                "request_id": "H-OBSERVED-ID",
+                "customer_id": "CU-HISTORY",
                 "stated_reason": "changed_mind",
                 "requested_at": "2026-01-01",
                 "amount_usd": "10.00",
@@ -1352,12 +1401,12 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertIn(_RULE_SENTENCE, heard)
         self.assertIn(general_note, heard)
         self.assertIn(other_reason_note, heard)
-        self.assertIn("RF-NOTE", heard)
-        self.assertIn("note_requires_review", heard)
+        self.assertNotIn("RF-NOTE", heard)
+        self.assertNotIn("note_requires_review", heard)
         self.assertIn("not ground truth", heard)
-        self.assertIn("OBSERVED_DUPLICATE_MARKER", heard)
-        self.assertIn("SAME_CUSTOMER_MARKER", heard)
-        self.assertIn("SIMILAR_REASON_MARKER", heard)
+        self.assertNotIn("OBSERVED_DUPLICATE_MARKER", heard)
+        self.assertNotIn("SAME_CUSTOMER_MARKER", heard)
+        self.assertNotIn("SIMILAR_REASON_MARKER", heard)
         self.assertNotIn(other_note, heard)
         self.assertNotIn(history_note, heard)
         self.assertEqual(_ids(paid["auto"]), ["RF-CLEAR"])
