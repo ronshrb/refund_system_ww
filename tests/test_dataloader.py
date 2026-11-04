@@ -40,7 +40,7 @@ class LoaderPreviewRegressionTests(unittest.TestCase):
         rows = load_rows(REPO_ROOT / "data" / "raw" / "history.csv")
         matches = preview_matching_rows(
             rows,
-            REPO_ROOT / "policies" / "auto-approve.example.json",
+            REPO_ROOT / "tests" / "fixtures" / "policies" / "auto-approve.example.json",
             already_paid_ids=set(),
         )
         self.assertEqual(

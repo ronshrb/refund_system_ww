@@ -4,22 +4,23 @@ A local Streamlit app that auto-handles refund rows the live policy already matc
 
 ## Run
 
-From the repository root.
+From the repository root. Replace `your-key` with the provider key.
 
-Install dependencies into a virtual environment:
+Paste this once in PowerShell. It creates `.venv` when that interpreter is missing, installs `requirements.txt`, sets the key, runs the tests, then starts the app. Streamlit starts only if the install and the tests succeed. Open **Reviews** and upload `data/raw/pending.csv`, or another CSV with the same columns.
 
 ```powershell
-python -m venv .venv
+if (-not (Test-Path .\.venv\Scripts\python.exe)) { python -m venv .venv }
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+if ($LASTEXITCODE -eq 0) {
+  $env:LLM_PROVIDER="openai"
+  $env:OPENAI_API_KEY="your-key"
+  $env:LLM_MODEL="gpt-4o-mini"
+  .\.venv\Scripts\python.exe -m unittest discover -s tests
+}
+if ($LASTEXITCODE -eq 0) { .\.venv\Scripts\python.exe -m streamlit run app/main.py }
 ```
 
-One command sets the key, runs the tests, then starts the app. Streamlit starts only if the tests pass. Open **Reviews** and upload `data/raw/pending.csv`, or another CSV with the same columns.
-
-```powershell
-$env:LLM_PROVIDER="openai"; $env:OPENAI_API_KEY="your-key"; $env:LLM_MODEL="gpt-4o-mini"; .\.venv\Scripts\python.exe -m unittest discover -s tests; if ($LASTEXITCODE -eq 0) { .\.venv\Scripts\python.exe -m streamlit run app/main.py }
-```
-
-Start the app on its own:
+After that install, start the app on its own:
 
 ```powershell
 .\.venv\Scripts\python.exe -m streamlit run app/main.py
@@ -34,7 +35,12 @@ Run the tests on their own:
 Open **Reviews**. Upload pending.csv, and click Review.
 Open **Policy Management** for the manager path: draft a policy, evaluate it based on history, then make a policy live.
 
-On macOS or Linux, use `python3 -m venv .venv`, then `.venv/bin/python` in place of `.\.venv\Scripts\python.exe`.
+On macOS or Linux, from the repository root:
+
+```bash
+test -x .venv/bin/python || python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt && LLM_PROVIDER=openai OPENAI_API_KEY=your-key LLM_MODEL=gpt-4o-mini .venv/bin/python -m unittest discover -s tests && .venv/bin/python -m streamlit run app/main.py
+```
 
 ## API key
 
