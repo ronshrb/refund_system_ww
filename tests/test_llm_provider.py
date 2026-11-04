@@ -11,11 +11,14 @@ from utils.policy.llm_provider import (
     ACCEPTED_SESSION_KEY,
     DEFAULT_PROVIDER,
     active_model_name,
+    blank_model_name,
     check_api_key,
     clear_runtime_llm,
     key_is_accepted,
     llm_configured,
+    offline_message,
     provider_settings,
+    PROVIDERS,
     resolve_api_key,
     set_runtime_llm,
 )
@@ -49,6 +52,32 @@ class RuntimeLlmTests(unittest.TestCase):
     def test_explicit_key_beats_the_session_key(self) -> None:
         set_runtime_llm(provider="openai", api_key="sidebar-test-key")
         self.assertEqual(resolve_api_key(api_key="call-key"), "call-key")
+
+    def test_offline_message_names_provider_key_and_model(self) -> None:
+        for name, settings in PROVIDERS.items():
+            text = offline_message(name)
+            self.assertIn(f"LLM_PROVIDER={name}", text)
+            self.assertIn(settings["key_env"], text)
+            self.assertIn("LLM_MODEL", text)
+            self.assertIn(settings["default_model"], text)
+
+    def test_blank_sidebar_reads_provider_key_and_model_from_the_environment(self) -> None:
+        with mock.patch("utils.policy.llm_provider.DEFAULT_PROVIDER", "gemini"):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LLM_MODEL": "gemini-2.5-pro",
+                    "GOOGLE_API_KEY": "env-gemini-key",
+                    "OPENAI_API_KEY": "env-openai-key",
+                },
+                clear=False,
+            ):
+                set_runtime_llm(provider="gemini", model="  ", api_key="  ")
+                self.assertEqual(provider_settings()["name"], "gemini")
+                self.assertEqual(resolve_api_key(), "env-gemini-key")
+                self.assertEqual(blank_model_name(), "gemini-2.5-pro")
+                self.assertEqual(active_model_name(), "gemini-2.5-pro")
+                self.assertNotEqual(resolve_api_key("openai"), "env-gemini-key")
 
     def test_clear_drops_the_session_choice(self) -> None:
         before = active_model_name()
@@ -115,6 +144,8 @@ class KeyCheckTests(unittest.TestCase):
         self.assertIn('st.button("Review", disabled=_stored is None or not _key_ready)', reviews)
         self.assertIn('st.chat_input("Describe a policy change…", disabled=not _key_ready)', builder)
         self.assertIn('st.button("Apply API key"', sidebar)
+        self.assertIn("LLM_MODEL", sidebar)
+        self.assertNotIn("already has an API key", sidebar)
 
 
 if __name__ == "__main__":

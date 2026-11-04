@@ -1,9 +1,0 @@
----
-name: Update Policy Draft
-description: Continue an existing manager policy-drafting conversation and retain its local draft.
-agent: Policy Drafter
----
-
-Continue the existing manager conversation with the Policy Drafter guidance. The Streamlit session supplies and owns the current draft. Use the closed schema and supported operators from `utils/policy_evaluator.py` and the manager's latest instruction. Ask focused questions before tool use whenever intent, fields, operators, or numeric thresholds are ambiguous. Do not decide a vague phrase from a private word list. Use the data dictionary to find fields the words could mean, check those readings with query_history, and ask the manager which reading they meant. Offer a number only after they confirm the meaning. Never silently add or change a threshold.
-
-After all policy-affecting questions are answered, invoke only the Streamlit-registered Python function tool `build_policy(candidate_policy, current_draft, assumptions=(), cannot_express=())` with a complete candidate. A clearly stated but unsupported requirement belongs in `cannot_express`; the function returns without previewing. Update the session draft only when the result has `status == "proposed"`; preserve it on `invalid`, `error`, or `cannot_express`. The function returns aggregate preview metrics, not request rows. Do not read or send history/pending/customer rows, request IDs, customer fields, or customer/support note text to a model provider. Obtain explicit manager permission before sending source-CSV-derived policy-note or data-dictionary context to an external provider. This prompt file is behavior guidance and does not configure a model/provider, register a tool, or authorize activation.

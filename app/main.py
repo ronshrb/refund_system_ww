@@ -10,9 +10,10 @@ Or with the project venv:
 
 This entry wires navigation and the model sidebar. Apply sends one short
 prompt to check the key. It does not evaluate refunds, call
-``build_policy``, or activate policy. A blank key still uses ``.env``.
-Nothing typed here is written to disk. Review and the policy chat stay off
-until that check succeeds for the current provider, model, and key.
+``build_policy``, or activate policy. A blank provider, key, or model
+uses the repository-root ``.env`` file. A value typed here replaces that
+for this session and is not written to disk. Review and the policy chat
+stay off until that check succeeds for the current provider, model, and key.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from utils.policy.llm_provider import (
     DEFAULT_PROVIDER,
     PROVIDERS,
     active_model_name,
+    blank_model_name,
     check_api_key,
     choice_signature,
     key_is_accepted,
@@ -63,27 +65,40 @@ def _model_sidebar() -> None:
         select_kwargs: dict = {
             "format_func": lambda name: PROVIDERS[name]["label"],
             "key": "llm_provider_choice",
+            "help": (
+                "Starts as LLM_PROVIDER from the repository-root .env. "
+                "Pick another provider to override it for this session."
+            ),
         }
         # After the first run the widget key owns the value.
         if "llm_provider_choice" not in st.session_state:
             select_kwargs["index"] = default_index
         provider = st.selectbox("Provider", names, **select_kwargs)
+        key_env = PROVIDERS[provider]["key_env"]
         api_key = st.text_input(
             "API key",
             type="password",
             key="llm_api_key_input",
-            help="This session only. Leave blank to use the key in .env. The key is not saved.",
+            help=(
+                f"Leave blank to use {key_env} from the repository-root .env. "
+                "A key typed here overrides it for this session and is not saved."
+            ),
         )
-        default_model = PROVIDERS[provider]["default_model"]
+        fallback_model = blank_model_name(provider)
         model_name = st.text_input(
             "Model",
             key="llm_model_name_input",
-            placeholder=default_model,
-            help=f"Optional. Blank uses {default_model}.",
+            placeholder=fallback_model,
+            help=(
+                "Leave blank to use LLM_MODEL from the repository-root .env "
+                "when this is the provider named by LLM_PROVIDER. "
+                f"Otherwise blank uses {PROVIDERS[provider]['default_model']}. "
+                "A model id typed here overrides that for this session."
+            ),
         )
         set_runtime_llm(provider=provider, model=model_name, api_key=api_key)
         _drop_review_caches_when_the_model_changes(provider, api_key)
-        # A key in the box or in .env is not enough. Apply must get a reply.
+        # A blank box is not a skip. Apply still checks the key from .env.
         if st.button("Apply API key", disabled=not llm_configured(), key="llm_apply_key"):
             with st.spinner("Checking the API key…"):
                 try:
@@ -100,7 +115,10 @@ def _model_sidebar() -> None:
 
 
 def _show_key_status() -> None:
-    """Say whether Apply has passed for the provider, model, and key on screen."""
+    """Say whether Apply has passed for the provider, model, and key on screen.
+
+    The caption names the model. It does not name or quote the key.
+    """
     error = st.session_state.get("llm_key_error") or ""
     error_for = st.session_state.get("llm_key_error_for")
     current = choice_signature() or ""
@@ -109,10 +127,14 @@ def _show_key_status() -> None:
     elif key_is_accepted(st.session_state):
         st.caption(
             f"{provider_settings()['label']}, model {active_model_name()}. "
-            "Key check passed. Nothing here is written to disk."
+            "Key check passed."
         )
     elif llm_configured():
-        st.caption("Apply the API key to turn on Review and the policy chat.")
+        st.caption(
+            f"{provider_settings()['label']}, model {active_model_name()}. "
+            "Blank fields use .env. Click Apply API key to turn on Review "
+            "and the policy chat."
+        )
     else:
         st.caption(offline_message())
 

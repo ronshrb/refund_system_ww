@@ -48,7 +48,7 @@ The last full-suite count recorded in a task brief is older than the current tre
 
 The model is required before Review classifies a file and before the policy chat will send a message. Apply in the sidebar runs one short prompt ("ok") with no refund row. Until that call returns a reply for the current provider, model, and key, Review and the policy chat stay disabled. The Policy Picker still previews history and can switch the live file.
 
-The sidebar on both pages takes a provider (OpenAI, Claude, or Gemini), an API key, and an optional model id. The key stays in the browser session. It is not written to disk and not printed. Leave the key blank to use `.env`, then click Apply API key. Leave the model blank to use that provider's default. Changing the provider, the model, or the key requires Apply again.
+The sidebar on both pages takes a provider (OpenAI, Claude, or Gemini), an API key, and a model id. Leave a field blank to use the repository-root `.env`: `LLM_PROVIDER`, that provider's key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GOOGLE_API_KEY`), and `LLM_MODEL` for the provider named by `LLM_PROVIDER`. A value typed in the sidebar replaces the matching `.env` value for that session. It is not written back to `.env` and not printed. Then click Apply API key. Changing the provider, the model, or the key requires Apply again.
 
 Copy nothing into source. A repository-root `.env` file (not committed) still works:
 

@@ -7,8 +7,10 @@ does not change when the provider does. The provider comes from
 variable unless the caller passes ``api_key``.
 
 The Streamlit sidebar stores one session choice with ``set_runtime_llm``.
-A typed key is used only for the provider selected in that session. It is
-not written to ``.env``. A blank model name keeps that provider's default.
+A typed provider, key, or model is used for that session only and is not
+written to ``.env``. A blank key uses that provider's environment variable.
+A blank model uses ``LLM_MODEL`` when the provider is ``LLM_PROVIDER``,
+and otherwise that provider's default.
 """
 
 from __future__ import annotations
@@ -122,26 +124,45 @@ def llm_configured(provider: str | None = None, api_key: str | None = None) -> b
 
 
 def offline_message(provider: str | None = None) -> str:
-    """Explain how to enable the agent when no key is set."""
+    """Explain how to enable the agent when no key is set.
+
+    Names the three ``.env`` entries used when the sidebar is left blank:
+    ``LLM_PROVIDER``, that provider's key, and ``LLM_MODEL``.
+    """
     try:
         settings = provider_settings(provider)
     except ValueError as error:
         return str(error)
+    allowed = ", ".join(sorted(PROVIDERS))
     return (
-        f"{settings['label']} is not configured. Enter an API key in the sidebar, "
-        f"or set `{settings['key_env']}` in the repository-root `.env` file. "
-        "Or choose another provider with "
-        f"`LLM_PROVIDER` ({', '.join(sorted(PROVIDERS))})."
+        f"{settings['label']} is not configured. Enter the provider, API key, "
+        "and model in the sidebar, or set "
+        f"`LLM_PROVIDER={settings['name']}`, `{settings['key_env']}`, and "
+        f"`LLM_MODEL` (default `{settings['default_model']}`) in the "
+        f"repository-root `.env` file. Allowed providers: {allowed}."
     )
+
+
+def blank_model_name(provider: str | None = None) -> str:
+    """Return the model id used when the sidebar model box is left blank.
+
+    ``LLM_MODEL`` applies only to the provider named by ``LLM_PROVIDER``.
+    Any other provider keeps its own default, so an OpenAI model id is not
+    sent to Gemini.
+    """
+    settings = provider_settings(provider)
+    if settings["name"] == DEFAULT_PROVIDER:
+        env_model = (os.environ.get("LLM_MODEL") or "").strip()
+        if env_model:
+            return env_model
+    return settings["default_model"]
 
 
 def active_model_name(provider: str | None = None, model: str | None = None) -> str:
     """Return the model id ``make_chat_model`` would use, without creating a client.
 
     An explicit name wins. Otherwise the session name is used, and only for
-    the provider it was typed with. ``LLM_MODEL`` applies only to the
-    provider named by ``LLM_PROVIDER`` at startup, so a Gemini session does
-    not inherit an OpenAI model id.
+    the provider it was typed with. A blank name uses ``blank_model_name``.
     """
     settings = provider_settings(provider)
     typed = model.strip() if isinstance(model, str) else ""
@@ -153,11 +174,7 @@ def active_model_name(provider: str | None = None, model: str | None = None) -> 
         and settings["name"] == _runtime_provider
     ):
         return _runtime_model
-    if settings["name"] == DEFAULT_PROVIDER:
-        env_model = (os.environ.get("LLM_MODEL") or "").strip()
-        if env_model:
-            return env_model
-    return settings["default_model"]
+    return blank_model_name(settings["name"])
 
 
 def choice_signature(
